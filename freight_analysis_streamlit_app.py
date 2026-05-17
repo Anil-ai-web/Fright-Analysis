@@ -1,11 +1,16 @@
 # ============================================================
 # Freight Analysis Dashboard - Streamlit App
-# Sheets Used: "Back Up" and "C&FA-Exp"
-# Corrected Version:
-# 1. Negative values preserved
-# 2. Net Sales calculated correctly from Net Bill
-# 3. Sales Return / Credit Note treated as negative
-# 4. Month order fixed sequentially
+# Sheets Used:
+# 1. Back Up
+# 2. C&FA-Exp
+#
+# Corrected Full Version:
+# - Net Sales corrected
+# - Negative values preserved
+# - C&FA Grand Total rows removed
+# - C&FA Grand Total columns removed
+# - Month order fixed
+# - Full dashboard included
 # ============================================================
 
 import re
@@ -144,14 +149,14 @@ def clean_col_name(x) -> str:
     if pd.isna(x):
         return ""
 
-    text = str(x).replace("\n", " ").strip()
+    text = str(x).replace("\n", " ").replace("\r", " ").strip()
     text = re.sub(r"\s+", " ", text)
 
     return text
 
 
 def normalize_key(x) -> str:
-    """Create a matching key for transporter/CFA names."""
+    """Create a matching key for names/headers."""
     if pd.isna(x):
         return ""
 
@@ -164,10 +169,8 @@ def normalize_key(x) -> str:
 def to_number(series: pd.Series) -> pd.Series:
     """
     Convert mixed Excel values into numeric values safely.
-
-    Important correction:
+    Important:
     Negative values are preserved.
-    Earlier logic replacing '-' with '0' caused wrong Net Sales.
     """
 
     s = series.astype(str).str.strip()
@@ -179,10 +182,11 @@ def to_number(series: pd.Series) -> pd.Series:
         .str.replace(")", "", regex=False)
         .str.replace("–", "-", regex=False)
         .str.replace("—", "-", regex=False)
+        .str.replace("\u00a0", "", regex=False)
     )
 
-    # Only standalone dash or blanks should become zero.
-    # Real negative numbers like -25000 will remain negative.
+    # Only blank / standalone dash should become zero.
+    # Real negative numbers like -25000 remain negative.
     s = s.replace(["", "-", "nan", "None", "NaT", "NULL", "null"], "0")
 
     return pd.to_numeric(s, errors="coerce").fillna(0)
@@ -242,50 +246,57 @@ def find_sheet_name(sheet_names: List[str], target: str) -> Optional[str]:
     """Find sheet name case/space-insensitively."""
     target_key = normalize_key(target)
 
-    for s in sheet_names:
-        if normalize_key(s) == target_key:
-            return s
+    for sheet in sheet_names:
+        if normalize_key(sheet) == target_key:
+            return sheet
+
+    # fallback partial match
+    for sheet in sheet_names:
+        if target_key in normalize_key(sheet) or normalize_key(sheet) in target_key:
+            return sheet
 
     return None
 
 
-def read_excel_file(uploaded_file, sheet_name: str, header=None) -> pd.DataFrame:
+def make_file_object(file_bytes: bytes, file_name: str) -> BytesIO:
+    bio = BytesIO(file_bytes)
+    bio.name = file_name
+    return bio
+
+
+def read_excel_file(file_bytes: bytes, file_name: str, sheet_name: str, header=None) -> pd.DataFrame:
     """Read Excel including .xlsb, .xlsx, .xlsm."""
-    file_name = uploaded_file.name.lower()
+    bio = make_file_object(file_bytes, file_name)
 
-    uploaded_file.seek(0)
-
-    if file_name.endswith(".xlsb"):
+    if file_name.lower().endswith(".xlsb"):
         return pd.read_excel(
-            uploaded_file,
+            bio,
             sheet_name=sheet_name,
             engine="pyxlsb",
             header=header
         )
 
     return pd.read_excel(
-        uploaded_file,
+        bio,
         sheet_name=sheet_name,
         header=header
     )
 
 
-def get_excel_sheets(uploaded_file) -> List[str]:
-    uploaded_file.seek(0)
+def get_excel_sheets(file_bytes: bytes, file_name: str) -> List[str]:
+    bio = make_file_object(file_bytes, file_name)
 
-    if uploaded_file.name.lower().endswith(".xlsb"):
-        xl = pd.ExcelFile(uploaded_file, engine="pyxlsb")
+    if file_name.lower().endswith(".xlsb"):
+        xl = pd.ExcelFile(bio, engine="pyxlsb")
     else:
-        xl = pd.ExcelFile(uploaded_file)
+        xl = pd.ExcelFile(bio)
 
     return xl.sheet_names
 
 
 def fix_month_order(df: pd.DataFrame, month_col: str = "Month") -> Tuple[pd.DataFrame, List[str]]:
     """
-    Fix month sorting like:
-    Jan-26, Feb-26, Mar-26, Apr-26
-    instead of alphabetical order.
+    Fix month sorting like Jan-26, Feb-26, Mar-26 instead of alphabetical order.
     """
 
     df = df.copy()
@@ -351,6 +362,48 @@ def fix_month_order(df: pd.DataFrame, month_col: str = "Month") -> Tuple[pd.Data
     return df, month_order
 
 
+def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
+    out = df.copy()
+
+    for col, selected in filters.items():
+        if col in out.columns and selected:
+            out = out[out[col].astype(str).isin(selected)]
+
+    return out
+
+
+def multi_filter(label: str, df: pd.DataFrame, col: str):
+    if col not in df.columns:
+        return []
+
+    options = sorted(
+        [
+            x
+            for x in df[col].dropna().astype(str).unique().tolist()
+            if x and x.lower() != "nan"
+        ]
+    )
+
+    return st.sidebar.multiselect(
+        label,
+        options=options,
+        default=[]
+    )
+
+
+def show_metric_card(title: str, value: str, note: str = ""):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-title">{title}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-note">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def make_bar(df, x, y, title, color=None, orientation="v", text_auto=True, category_orders=None):
     if df.empty:
         st.info("No data available for this chart based on current filters.")
@@ -411,55 +464,18 @@ def make_line(df, x, y, title, color=None, category_orders=None):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def show_metric_card(title: str, value: str, note: str = ""):
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-title">{title}</div>
-            <div class="metric-value">{value}</div>
-            <div class="metric-note">{note}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-    out = df.copy()
-
-    for col, selected in filters.items():
-        if col in out.columns and selected:
-            out = out[out[col].astype(str).isin(selected)]
-
-    return out
-
-
-def multi_filter(label: str, df: pd.DataFrame, col: str):
-    if col not in df.columns:
-        return []
-
-    options = sorted(
-        [
-            x
-            for x in df[col].dropna().astype(str).unique().tolist()
-            if x and x.lower() != "nan"
-        ]
-    )
-
-    return st.sidebar.multiselect(
-        label,
-        options=options,
-        default=[]
-    )
-
-
 def download_excel_button(sheets: dict, file_name: str):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         for sheet, data in sheets.items():
-            safe_sheet = sheet[:31]
-            data.to_excel(writer, index=False, sheet_name=safe_sheet)
+            safe_sheet = str(sheet)[:31]
+
+            data.to_excel(
+                writer,
+                index=False,
+                sheet_name=safe_sheet
+            )
 
             worksheet = writer.sheets[safe_sheet]
 
@@ -475,6 +491,18 @@ def download_excel_button(sheets: dict, file_name: str):
     )
 
 
+def is_total_text(value) -> bool:
+    key = normalize_key(value)
+    return key in [
+        "TOTAL",
+        "GRANDTOTAL",
+        "GTOTAL",
+        "GRTOTAL",
+        "OVERALLTOTAL",
+        "SUBTOTAL",
+    ]
+
+
 # ============================================================
 # Data Loading and Preparation
 # ============================================================
@@ -483,10 +511,7 @@ def download_excel_button(sheets: dict, file_name: str):
 def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load Back Up and C&FA-Exp sheets, then prepare clean tables."""
 
-    bio = BytesIO(file_bytes)
-    bio.name = file_name
-
-    sheet_names = get_excel_sheets(bio)
+    sheet_names = get_excel_sheets(file_bytes, file_name)
 
     backup_sheet = find_sheet_name(sheet_names, "Back Up")
     cfa_sheet = find_sheet_name(sheet_names, "C&FA-Exp")
@@ -499,14 +524,12 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
 
     # ------------------------------------------------------------
     # Back Up sheet
-    # Header is on Excel row 2, so header=1.
+    # Header observed on Excel row 2, so header=1.
     # ------------------------------------------------------------
 
-    bio = BytesIO(file_bytes)
-    bio.name = file_name
-
     backup = read_excel_file(
-        bio,
+        file_bytes,
+        file_name,
         backup_sheet,
         header=1
     )
@@ -518,6 +541,13 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     # Keep only transaction rows if Invoice No exists.
     if "Invoice No" in backup.columns:
         backup = backup[backup["Invoice No"].notna()].copy()
+
+    # Remove possible total rows from Back Up also.
+    for possible_col in ["Invoice No", "Month", "Transporter", "Sales Verticle"]:
+        if possible_col in backup.columns:
+            backup = backup[
+                ~backup[possible_col].astype(str).apply(is_total_text)
+            ].copy()
 
     # Date conversion for .xlsb serial dates.
     if "Date" in backup.columns:
@@ -551,6 +581,9 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     for col in numeric_cols:
         if col in backup.columns:
             backup[col] = to_number(backup[col])
+        else:
+            if col in ["Net Bill", "Freight", "Received Bill Amount", "Loading", "Unloading", "Box", "Weight"]:
+                backup[col] = 0
 
     # Text columns
     text_cols = [
@@ -577,79 +610,95 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
                 .str.strip()
             )
 
-    # Standardize Sales Vertical column spelling if required.
+    # Standardize Sales Vertical spelling if required.
     if "Sales Vertical" in backup.columns and "Sales Verticle" not in backup.columns:
         backup["Sales Verticle"] = backup["Sales Vertical"]
+
+    if "Sales Verticle" not in backup.columns:
+        backup["Sales Verticle"] = "Not Available"
+
+    if "Month" not in backup.columns:
+        backup["Month"] = "Not Available"
+
+    if "Transporter" not in backup.columns:
+        backup["Transporter"] = "Not Available"
+
+    if "State" not in backup.columns:
+        backup["State"] = "Not Available"
+
+    if "Zone" not in backup.columns:
+        backup["Zone"] = "Not Available"
+
+    if "Plant Name" not in backup.columns:
+        backup["Plant Name"] = "Not Available"
+
+    if "Expense type" not in backup.columns:
+        backup["Expense type"] = "Not Available"
+
+    if "Billing Type" not in backup.columns:
+        backup["Billing Type"] = "Not Available"
 
     # ------------------------------------------------------------
     # Correct Net Sales Calculation
     # ------------------------------------------------------------
 
-    if "Net Bill" not in backup.columns:
-        backup["Net Bill"] = 0
-
     backup["Net Sales"] = backup["Net Bill"]
 
-    if "Billing Type" in backup.columns:
-        billing_type_clean = backup["Billing Type"].astype(str).str.upper().str.strip()
+    billing_type_clean = backup["Billing Type"].astype(str).str.upper().str.strip()
 
-        return_mask = (
-            billing_type_clean.str.contains("SALE RETURN", na=False)
-            | billing_type_clean.str.contains("SALES RETURN", na=False)
-            | billing_type_clean.str.contains("RETURN", na=False)
-            | billing_type_clean.str.contains("CREDIT NOTE", na=False)
-            | billing_type_clean.str.contains("CREDIT", na=False)
-            | billing_type_clean.str.contains("CN", na=False)
-        )
+    return_mask = (
+        billing_type_clean.str.contains("SALE RETURN", na=False)
+        | billing_type_clean.str.contains("SALES RETURN", na=False)
+        | billing_type_clean.str.contains("RETURN", na=False)
+        | billing_type_clean.str.contains("CREDIT NOTE", na=False)
+        | billing_type_clean.str.contains("CREDIT", na=False)
+        | billing_type_clean.str.contains("CN", na=False)
+    )
 
-        # If returns / credit notes are positive in Excel, make them negative.
-        # If already negative, keep them negative.
-        backup.loc[return_mask, "Net Sales"] = -backup.loc[return_mask, "Net Bill"].abs()
+    # If returns / credit notes are positive in Excel, make them negative.
+    # If already negative, keep them negative.
+    backup.loc[return_mask, "Net Sales"] = -backup.loc[return_mask, "Net Bill"].abs()
 
     # ------------------------------------------------------------
-    # Calculated fields
+    # Calculated Back Up fields
     # ------------------------------------------------------------
 
     backup["Calculated Freight %"] = np.where(
         backup["Net Sales"].astype(float) != 0,
-        backup.get("Freight", 0).astype(float) / backup["Net Sales"].astype(float),
+        backup["Freight"].astype(float) / backup["Net Sales"].astype(float),
         0,
     )
 
     backup["Received vs Freight Variance"] = (
-        backup.get("Received Bill Amount", 0)
-        - backup.get("Freight", 0)
+        backup["Received Bill Amount"]
+        - backup["Freight"]
     )
 
     backup["Loading + Unloading"] = (
-        backup.get("Loading", 0)
-        + backup.get("Unloading", 0)
+        backup["Loading"]
+        + backup["Unloading"]
     )
 
     backup["Total Logistic Cost"] = (
-        backup.get("Freight", 0)
+        backup["Freight"]
         + backup["Loading + Unloading"]
     )
 
-    if "Transporter" in backup.columns:
-        backup["Transporter Match Key"] = backup["Transporter"].apply(normalize_key)
-    else:
-        backup["Transporter Match Key"] = ""
+    backup["Transporter Match Key"] = backup["Transporter"].apply(normalize_key)
 
     if "Transporter/CFA" in backup.columns:
         backup["Transporter CFA Match Key"] = backup["Transporter/CFA"].apply(normalize_key)
     else:
+        backup["Transporter/CFA"] = backup["Transporter"]
         backup["Transporter CFA Match Key"] = backup["Transporter Match Key"]
 
     # ------------------------------------------------------------
-    # C&FA-Exp sheet
+    # C&FA-Exp Sheet
     # ------------------------------------------------------------
 
-    bio = BytesIO(file_bytes)
-    bio.name = file_name
-
     raw = read_excel_file(
-        bio,
+        file_bytes,
+        file_name,
         cfa_sheet,
         header=None
     )
@@ -708,34 +757,70 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         & data["Nature"].notna()
     ].copy()
 
+    # ------------------------------------------------------------
+    # Important Fix:
+    # Remove Grand Total / Total rows from C&FA-Exp.
+    # ------------------------------------------------------------
+
+    data = data[
+        ~data["Month"].astype(str).apply(is_total_text)
+        & ~data["Nature"].astype(str).apply(is_total_text)
+    ].copy()
+
+    # Also remove rows where month/nature contains grand total words.
+    data = data[
+        ~data["Month"].astype(str).str.upper().str.contains("GRAND TOTAL|TOTAL", na=False)
+        & ~data["Nature"].astype(str).str.upper().str.contains("GRAND TOTAL|TOTAL", na=False)
+    ].copy()
+
+    # ------------------------------------------------------------
+    # Convert C&FA-Exp from wide format to long format.
+    # Also skip Grand Total / Total columns at every level.
+    # ------------------------------------------------------------
+
     long_rows = []
 
     for col_idx, col in enumerate(data.columns):
         if col in ["Month", "Nature"]:
             continue
 
-        if normalize_key(col) in ["GRANDTOTAL", "TOTAL"]:
-            continue
-
         cfa_name = cfa_names[col_idx] if col_idx < len(cfa_names) else col
         location = col
 
+        col_key = normalize_key(col)
+        cfa_key = normalize_key(cfa_name)
+        location_key = normalize_key(location)
+
+        # Remove Grand Total / Total columns
+        if col_key in ["GRANDTOTAL", "TOTAL", "GTOTAL", "SUBTOTAL"]:
+            continue
+
+        # Remove CFA name level total columns
+        if cfa_key in ["GRANDTOTAL", "TOTAL", "GTOTAL", "SUBTOTAL"]:
+            continue
+
+        # Remove location level total columns
+        if location_key in ["GRANDTOTAL", "TOTAL", "GTOTAL", "SUBTOTAL"]:
+            continue
+
+        # Also skip if text contains total.
+        if "TOTAL" in col_key or "TOTAL" in cfa_key or "TOTAL" in location_key:
+            continue
+
         temp = data[["Month", "Nature", col]].copy()
         temp = temp.rename(columns={col: "Expense Amount"})
+
         temp["CFA Name"] = cfa_name
         temp["CFA Location"] = location
         temp["Expense Amount"] = to_number(temp["Expense Amount"])
+
+        # Keep only actual non-zero expense rows.
+        temp = temp[temp["Expense Amount"] != 0].copy()
 
         long_rows.append(temp)
 
     if long_rows:
         cfa_long = pd.concat(long_rows, ignore_index=True)
-    else:
-        cfa_long = pd.DataFrame()
-
-    if not cfa_long.empty:
-        cfa_long = cfa_long[cfa_long["Expense Amount"] != 0].copy()
-        cfa_long["CFA Match Key"] = cfa_long["CFA Name"].apply(normalize_key)
     else:
         cfa_long = pd.DataFrame(
             columns=[
@@ -744,9 +829,13 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
                 "Expense Amount",
                 "CFA Name",
                 "CFA Location",
-                "CFA Match Key",
             ]
         )
+
+    if not cfa_long.empty:
+        cfa_long["CFA Match Key"] = cfa_long["CFA Name"].apply(normalize_key)
+    else:
+        cfa_long["CFA Match Key"] = ""
 
     # ------------------------------------------------------------
     # C&FA Reconciliation
@@ -757,15 +846,14 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     if "Transporter/CFA" in backup_cfa_base.columns:
         name_col = "Transporter/CFA"
         key_col = "Transporter CFA Match Key"
-    elif "Transporter" in backup_cfa_base.columns:
-        name_col = "Transporter"
-        key_col = "Transporter Match Key"
     else:
-        backup_cfa_base["Transporter"] = ""
         name_col = "Transporter"
         key_col = "Transporter Match Key"
 
-    invoice_agg = ("Invoice No", "nunique") if "Invoice No" in backup.columns else ("Freight", "count")
+    if "Invoice No" in backup.columns:
+        invoice_agg = ("Invoice No", "nunique")
+    else:
+        invoice_agg = ("Freight", "count")
 
     backup_cfa_sum = (
         backup_cfa_base.groupby([key_col, name_col], dropna=False)
@@ -784,18 +872,27 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         )
     )
 
-    cfa_sum = (
-        cfa_long.groupby(["CFA Match Key", "CFA Name"], dropna=False)
-        .agg(
-            CFA_Expense=("Expense Amount", "sum")
+    if not cfa_long.empty:
+        cfa_sum = (
+            cfa_long.groupby(["CFA Match Key", "CFA Name"], dropna=False)
+            .agg(
+                CFA_Expense=("Expense Amount", "sum")
+            )
+            .reset_index()
+            .rename(
+                columns={
+                    "CFA Match Key": "Match Key"
+                }
+            )
         )
-        .reset_index()
-        .rename(
-            columns={
-                "CFA Match Key": "Match Key"
-            }
+    else:
+        cfa_sum = pd.DataFrame(
+            columns=[
+                "Match Key",
+                "CFA Name",
+                "CFA_Expense"
+            ]
         )
-    )
 
     recon = backup_cfa_sum.merge(
         cfa_sum,
@@ -813,6 +910,9 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         "Invoice_Count",
         "CFA_Expense"
     ]:
+        if c not in recon.columns:
+            recon[c] = 0
+
         recon[c] = recon[c].fillna(0)
 
     recon["CFA Expense vs Received Bill Variance"] = (
@@ -867,6 +967,7 @@ try:
     )
 except Exception as e:
     st.error(f"Unable to process workbook: {e}")
+    st.exception(e)
     st.stop()
 
 
@@ -896,6 +997,7 @@ st.sidebar.header("🏢 C&FA Filters")
 cfa_months = multi_filter("C&FA Month", cfa_df, "Month")
 cfa_names = multi_filter("C&FA Name", cfa_df, "CFA Name")
 cfa_natures = multi_filter("Expense Nature", cfa_df, "Nature")
+cfa_locations = multi_filter("C&FA Location", cfa_df, "CFA Location")
 
 cfa_filtered = apply_filters(
     cfa_df,
@@ -903,6 +1005,7 @@ cfa_filtered = apply_filters(
         "Month": cfa_months,
         "CFA Name": cfa_names,
         "Nature": cfa_natures,
+        "CFA Location": cfa_locations,
     }
 )
 
@@ -993,7 +1096,7 @@ with k8:
     show_metric_card(
         "C&FA Expense",
         fmt_inr(cfa_total),
-        "As per C&FA-Exp sheet"
+        "Grand Total / Total rows and columns removed"
     )
 
 
@@ -1032,6 +1135,7 @@ with tab1:
                 Net_Sales=("Net Sales", "sum"),
                 Freight=("Freight", "sum"),
                 Received_Bill=("Received Bill Amount", "sum"),
+                Total_Logistic_Cost=("Total Logistic Cost", "sum"),
             )
             .reset_index()
         )
@@ -1039,6 +1143,12 @@ with tab1:
         monthly["Freight %"] = np.where(
             monthly["Net_Sales"] != 0,
             monthly["Freight"] / monthly["Net_Sales"] * 100,
+            0
+        )
+
+        monthly["Logistic Cost %"] = np.where(
+            monthly["Net_Sales"] != 0,
+            monthly["Total_Logistic_Cost"] / monthly["Net_Sales"] * 100,
             0
         )
 
@@ -1114,11 +1224,13 @@ with tab1:
         )
 
     st.markdown("#### Month-wise Summary")
-    st.dataframe(
-        monthly.drop(columns=["_Month_Date"], errors="ignore"),
-        use_container_width=True,
-        hide_index=True
-    )
+
+    if not monthly.empty:
+        st.dataframe(
+            monthly.drop(columns=["_Month_Date"], errors="ignore"),
+            use_container_width=True,
+            hide_index=True
+        )
 
 
 # ============================================================
@@ -1241,16 +1353,21 @@ with tab3:
     c1, c2 = st.columns(2)
 
     with c1:
-        vertical = (
-            filtered.groupby("Sales Verticle", dropna=False)
-            .agg(
-                Net_Sales=("Net Sales", "sum"),
-                Freight=("Freight", "sum"),
-                Invoice_Count=("Invoice No", "nunique")
+        if "Sales Verticle" in filtered.columns:
+            invoice_agg = ("Invoice No", "nunique") if "Invoice No" in filtered.columns else ("Freight", "count")
+
+            vertical = (
+                filtered.groupby("Sales Verticle", dropna=False)
+                .agg(
+                    Net_Sales=("Net Sales", "sum"),
+                    Freight=("Freight", "sum"),
+                    Invoice_Count=invoice_agg
+                )
+                .reset_index()
+                .sort_values("Freight", ascending=False)
             )
-            .reset_index()
-            .sort_values("Freight", ascending=False)
-        ) if "Sales Verticle" in filtered.columns and "Invoice No" in filtered.columns else pd.DataFrame()
+        else:
+            vertical = pd.DataFrame()
 
         make_bar(
             vertical,
@@ -1260,16 +1377,21 @@ with tab3:
         )
 
     with c2:
-        plant = (
-            filtered.groupby("Plant Name", dropna=False)
-            .agg(
-                Net_Sales=("Net Sales", "sum"),
-                Freight=("Freight", "sum"),
-                Invoice_Count=("Invoice No", "nunique")
+        if "Plant Name" in filtered.columns:
+            invoice_agg = ("Invoice No", "nunique") if "Invoice No" in filtered.columns else ("Freight", "count")
+
+            plant = (
+                filtered.groupby("Plant Name", dropna=False)
+                .agg(
+                    Net_Sales=("Net Sales", "sum"),
+                    Freight=("Freight", "sum"),
+                    Invoice_Count=invoice_agg
+                )
+                .reset_index()
+                .sort_values("Freight", ascending=False)
             )
-            .reset_index()
-            .sort_values("Freight", ascending=False)
-        ) if "Plant Name" in filtered.columns and "Invoice No" in filtered.columns else pd.DataFrame()
+        else:
+            plant = pd.DataFrame()
 
         make_bar(
             plant,
@@ -1429,7 +1551,6 @@ with tab4:
             )
 
         st.markdown("#### C&FA Expense Detail")
-
         st.dataframe(
             cfa_filtered,
             use_container_width=True,
@@ -1448,7 +1569,7 @@ with tab5:
     )
 
     st.markdown(
-        '<div class="small-caption">This compares Back Up sheet transporter/CFA received bill and freight with the C&FA-Exp sheet expense amount using normalized names.</div>',
+        '<div class="small-caption">This compares Back Up sheet transporter/CFA received bill and freight with the C&FA-Exp sheet expense amount using normalized names. Grand Total values are excluded from C&FA-Exp.</div>',
         unsafe_allow_html=True
     )
 
@@ -1534,5 +1655,6 @@ with tab6:
 st.caption(
     "Dashboard logic: Back Up sheet = freight, billing, transporter and sales analysis. "
     "C&FA-Exp sheet = C&FA name/location/nature-wise expense analysis. "
-    "Net Sales is calculated after reducing Sales Return / Credit Note values."
+    "Net Sales is calculated after reducing Sales Return / Credit Note values. "
+    "Grand Total / Total rows and columns from C&FA-Exp are excluded."
 )
