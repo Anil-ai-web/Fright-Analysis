@@ -1,1495 +1,716 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
+# ============================================================
+# Freight Analysis Dashboard - Streamlit App
+# Based on sheets: "Back Up" and "C&FA-Exp"
+# Developed for detailed freight, billing, transporter and C&FA expense analysis
+# ============================================================
+
+import re
 from io import BytesIO
+from typing import List, Optional, Tuple
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
+
+# -----------------------------
+# Page Config
+# -----------------------------
 st.set_page_config(
     page_title="Freight Analysis Dashboard",
     page_icon="🚚",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# =========================================================
-# CUSTOM CSS
-# =========================================================
 
+# -----------------------------
+# Premium CSS
+# -----------------------------
 st.markdown(
     """
     <style>
-        .main {
-            background-color: #f7f9fc;
+        .main {background: #f7f9fc;}
+        .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
+        .hero-box {
+            background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 52%, #0f766e 100%);
+            color: white;
+            padding: 24px 28px;
+            border-radius: 22px;
+            box-shadow: 0 14px 40px rgba(15, 23, 42, 0.18);
+            margin-bottom: 18px;
         }
-
-        .main-title {
+        .hero-title {
             font-size: 34px;
             font-weight: 800;
-            color: #111827;
-            margin-bottom: 0px;
+            margin-bottom: 4px;
+            letter-spacing: -0.5px;
         }
-
-        .sub-title {
+        .hero-subtitle {
             font-size: 15px;
-            color: #6b7280;
-            margin-top: 0px;
-            margin-bottom: 22px;
+            opacity: 0.92;
+            margin-top: 3px;
         }
-
-        .section-title {
-            font-size: 24px;
-            font-weight: 750;
-            color: #111827;
-            margin-top: 25px;
-            margin-bottom: 10px;
-        }
-
         .metric-card {
-            background: #ffffff;
-            padding: 18px 20px;
+            background: white;
+            padding: 17px 18px;
             border-radius: 18px;
-            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
             border: 1px solid #e5e7eb;
-            min-height: 115px;
+            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.06);
+            min-height: 112px;
         }
-
-        .metric-label {
+        .metric-title {
+            color: #64748b;
             font-size: 13px;
-            color: #6b7280;
-            font-weight: 600;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .45px;
+        }
+        .metric-value {
+            color: #0f172a;
+            font-size: 24px;
+            font-weight: 850;
+            margin-top: 8px;
+            line-height: 1.15;
+        }
+        .metric-note {
+            color: #64748b;
+            font-size: 12px;
+            margin-top: 7px;
+        }
+        .section-title {
+            font-size: 22px;
+            font-weight: 800;
+            color: #0f172a;
+            margin-top: 12px;
             margin-bottom: 8px;
         }
-
-        .metric-value {
-            font-size: 25px;
-            color: #111827;
-            font-weight: 800;
+        .small-caption {
+            color: #64748b;
+            font-size: 13px;
+            margin-bottom: 8px;
         }
-
-        .metric-small {
-            font-size: 12px;
-            color: #9ca3af;
-            margin-top: 6px;
+        div[data-testid="stDataFrame"] {
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 8px 26px rgba(15, 23, 42, 0.05);
         }
-
-        div[data-testid="stMetricValue"] {
-            font-size: 24px;
-            font-weight: 800;
-        }
-
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-        }
-
+        .stTabs [data-baseweb="tab-list"] {gap: 10px;}
         .stTabs [data-baseweb="tab"] {
-            height: 45px;
-            border-radius: 12px;
-            padding: 8px 18px;
-            background-color: #ffffff;
+            background: white;
+            border-radius: 14px 14px 0 0;
+            padding: 12px 18px;
             border: 1px solid #e5e7eb;
-            font-weight: 700;
-        }
-
-        .stTabs [aria-selected="true"] {
-            background-color: #0f172a !important;
-            color: white !important;
         }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# =========================================================
-# HELPER FUNCTIONS
-# =========================================================
 
-def clean_col_name(col):
-    col = str(col).strip()
-    col = col.replace("\n", " ")
-    col = col.replace("\r", " ")
-    col = " ".join(col.split())
-    col = col.replace(" ", "_")
-    col = col.replace("-", "_")
-    col = col.replace("/", "_")
-    col = col.replace(".", "")
-    col = col.replace("&", "and")
-    col = col.replace("%", "Percent")
-    return col
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def clean_col_name(x) -> str:
+    """Clean Excel column headers into stable strings."""
+    if pd.isna(x):
+        return ""
+    text = str(x).replace("\n", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-def clean_dataframe_columns(df):
-    df = df.copy()
-    df.columns = [clean_col_name(c) for c in df.columns]
-    return df
+def normalize_key(x) -> str:
+    """Create a matching key for transporter/CFA names."""
+    if pd.isna(x):
+        return ""
+    text = str(x).upper().replace("&", "AND")
+    text = re.sub(r"[^A-Z0-9]+", "", text)
+    return text
 
 
-def to_number(series):
-    return (
+def to_number(series: pd.Series) -> pd.Series:
+    """Convert mixed Excel values into numeric values safely."""
+    return pd.to_numeric(
         series.astype(str)
         .str.replace(",", "", regex=False)
         .str.replace("₹", "", regex=False)
-        .str.replace("(", "-", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.strip()
-        .replace(["", "nan", "None", "NaT"], np.nan)
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0)
-    )
+        .str.replace("-", "0", regex=False)
+        .str.strip(),
+        errors="coerce",
+    ).fillna(0)
 
 
-def format_inr(value):
+def fmt_inr(value) -> str:
+    """Indian number format with rupee sign, no decimal."""
     try:
         value = float(value)
     except Exception:
-        value = 0
+        return "₹0"
+    sign = "-" if value < 0 else ""
+    value = abs(round(value))
+    s = str(int(value))
+    if len(s) <= 3:
+        return f"{sign}₹{s}"
+    last3 = s[-3:]
+    rest = s[:-3]
+    parts = []
+    while len(rest) > 2:
+        parts.insert(0, rest[-2:])
+        rest = rest[:-2]
+    if rest:
+        parts.insert(0, rest)
+    return f"{sign}₹{','.join(parts)},{last3}"
 
-    negative = value < 0
-    value = abs(value)
 
-    if value >= 10_000_000:
-        result = f"₹{value / 10_000_000:,.2f} Cr"
-    elif value >= 100_000:
-        result = f"₹{value / 100_000:,.2f} L"
-    elif value >= 1_000:
-        result = f"₹{value / 1_000:,.2f} K"
-    else:
-        result = f"₹{value:,.0f}"
-
-    return f"-{result}" if negative else result
+def fmt_num(value) -> str:
+    try:
+        return f"{float(value):,.0f}"
+    except Exception:
+        return "0"
 
 
-def safe_find_column(df, possible_names):
-    cols = list(df.columns)
+def safe_div(num, den):
+    try:
+        den = float(den)
+        if den == 0:
+            return 0
+        return float(num) / den
+    except Exception:
+        return 0
 
-    normalized_cols = {
-        c.lower().replace("_", "").replace(" ", "").replace(".", "").replace("-", "").replace("&", "and"): c
-        for c in cols
-    }
 
-    for name in possible_names:
-        key = name.lower().replace("_", "").replace(" ", "").replace(".", "").replace("-", "").replace("&", "and")
-        if key in normalized_cols:
-            return normalized_cols[key]
-
-    for c in cols:
-        c_norm = c.lower().replace("_", " ")
-        for name in possible_names:
-            n_norm = name.lower().replace("_", " ")
-            if n_norm in c_norm:
-                return c
-
+def find_sheet_name(sheet_names: List[str], target: str) -> Optional[str]:
+    """Find sheet name case/space-insensitively."""
+    target_key = normalize_key(target)
+    for s in sheet_names:
+        if normalize_key(s) == target_key:
+            return s
     return None
 
 
-def make_month_from_date(df):
-    df = df.copy()
+def read_excel_file(uploaded_file, sheet_name: str, header=None) -> pd.DataFrame:
+    """Read Excel including .xlsb, .xlsx, .xlsm."""
+    file_name = uploaded_file.name.lower()
+    uploaded_file.seek(0)
+    if file_name.endswith(".xlsb"):
+        return pd.read_excel(uploaded_file, sheet_name=sheet_name, engine="pyxlsb", header=header)
+    return pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header)
 
-    possible_date_cols = [
-        "Date",
-        "Billing_Date",
-        "Bill_Date",
-        "Invoice_Date",
-        "Month",
-        "Posting_Date",
-        "Created_on",
-        "Created_On"
-    ]
 
-    month_col = safe_find_column(df, ["Month", "Months"])
-
-    if month_col:
-        df["Month"] = df[month_col].astype(str).str.strip()
-        return df
-
-    date_col = safe_find_column(df, possible_date_cols)
-
-    if date_col:
-        date_data = pd.to_datetime(df[date_col], errors="coerce")
-        df["Month"] = date_data.dt.strftime("%b-%y")
+def get_excel_sheets(uploaded_file) -> List[str]:
+    uploaded_file.seek(0)
+    if uploaded_file.name.lower().endswith(".xlsb"):
+        xl = pd.ExcelFile(uploaded_file, engine="pyxlsb")
     else:
-        df["Month"] = "Unknown"
+        xl = pd.ExcelFile(uploaded_file)
+    return xl.sheet_names
 
-    return df
 
+@st.cache_data(show_spinner=False)
+def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load Back Up and C&FA-Exp sheets, then prepare clean tables."""
+    bio = BytesIO(file_bytes)
+    bio.name = file_name
+    sheet_names = get_excel_sheets(bio)
 
-def fix_month_order(df, month_col="Month"):
-    df = df.copy()
+    backup_sheet = find_sheet_name(sheet_names, "Back Up")
+    cfa_sheet = find_sheet_name(sheet_names, "C&FA-Exp")
 
-    if month_col not in df.columns:
-        return df, []
+    if not backup_sheet:
+        raise ValueError('Sheet "Back Up" not found in uploaded workbook.')
+    if not cfa_sheet:
+        raise ValueError('Sheet "C&FA-Exp" not found in uploaded workbook.')
 
-    month_text = df[month_col].astype(str).str.strip()
+    # Back Up sheet: observed header is on Excel row 2, so use header=1.
+    bio = BytesIO(file_bytes); bio.name = file_name
+    backup = read_excel_file(bio, backup_sheet, header=1)
+    backup.columns = [clean_col_name(c) for c in backup.columns]
+    backup = backup.loc[:, [c for c in backup.columns if c != ""]]
+    backup = backup.dropna(how="all")
 
-    df["_Month_Date"] = pd.to_datetime(
-        month_text,
-        format="%b-%y",
-        errors="coerce"
+    # Remove possible summary rows and keep rows having main invoice/reference information.
+    if "Invoice No" in backup.columns:
+        backup = backup[backup["Invoice No"].notna()].copy()
+
+    # Date conversion for pyxlsb serial dates.
+    if "Date" in backup.columns:
+        if pd.api.types.is_numeric_dtype(backup["Date"]):
+            backup["Date"] = pd.to_datetime(backup["Date"], unit="D", origin="1899-12-30", errors="coerce")
+        else:
+            backup["Date"] = pd.to_datetime(backup["Date"], errors="coerce", dayfirst=True)
+
+    # Numeric columns in Back Up.
+    numeric_cols = [
+        "Net Bill", "Total Bill", "Box", "Weight", "Loading", "Unloading",
+        "Freight", "Freight %", "Received Bill Amount",
+    ]
+    for col in numeric_cols:
+        if col in backup.columns:
+            backup[col] = to_number(backup[col])
+
+    # Clean common text columns.
+    text_cols = [
+        "Month", "Plant Name", "Billing Type", "Sales Verticle", "State", "Zone",
+        "Transporter", "Expense type", "Transporter/CFA", "Party Code", "TXTSold-to party",
+    ]
+    for col in text_cols:
+        if col in backup.columns:
+            backup[col] = backup[col].astype(str).replace("nan", np.nan).str.strip()
+
+    # Calculated fields.
+    backup["Calculated Freight %"] = np.where(
+        backup.get("Net Bill", 0).astype(float) != 0,
+        backup.get("Freight", 0).astype(float) / backup.get("Net Bill", 0).astype(float),
+        0,
     )
+    backup["Received vs Freight Variance"] = backup.get("Received Bill Amount", 0) - backup.get("Freight", 0)
+    backup["Loading + Unloading"] = backup.get("Loading", 0) + backup.get("Unloading", 0)
+    backup["Total Logistic Cost"] = backup.get("Freight", 0) + backup["Loading + Unloading"]
+    backup["Transporter Match Key"] = backup.get("Transporter", pd.Series(dtype=str)).apply(normalize_key)
+    if "Transporter/CFA" in backup.columns:
+        backup["Transporter CFA Match Key"] = backup["Transporter/CFA"].apply(normalize_key)
+    else:
+        backup["Transporter CFA Match Key"] = backup["Transporter Match Key"]
 
-    if df["_Month_Date"].isna().all():
-        df["_Month_Date"] = pd.to_datetime(
-            month_text,
-            errors="coerce"
+    # C&FA-Exp sheet: observed structure has CFA names in row 4 and headers/locations in row 5.
+    bio = BytesIO(file_bytes); bio.name = file_name
+    raw = read_excel_file(bio, cfa_sheet, header=None)
+    raw = raw.dropna(how="all").reset_index(drop=True)
+
+    # Locate row where first two columns are Month and Nature.
+    header_idx = None
+    for i in range(len(raw)):
+        first = clean_col_name(raw.iloc[i, 0]).upper()
+        second = clean_col_name(raw.iloc[i, 1]).upper()
+        if first == "MONTH" and second == "NATURE":
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError('Could not identify Month/Nature header row in "C&FA-Exp" sheet.')
+
+    cfa_name_row = header_idx - 1
+    location_headers = [clean_col_name(x) for x in raw.iloc[header_idx].tolist()]
+    cfa_names = [clean_col_name(x) for x in raw.iloc[cfa_name_row].tolist()]
+    data = raw.iloc[header_idx + 1:].copy().reset_index(drop=True)
+    data.columns = location_headers
+    data = data.dropna(how="all")
+
+    # First two columns should be Month and Nature.
+    month_col = data.columns[0]
+    nature_col = data.columns[1]
+    data = data.rename(columns={month_col: "Month", nature_col: "Nature"})
+    data["Month"] = data["Month"].astype(str).replace("nan", np.nan).str.strip()
+    data["Nature"] = data["Nature"].astype(str).replace("nan", np.nan).str.strip()
+    data = data[data["Month"].notna() & data["Nature"].notna()].copy()
+
+    # Build long C&FA table.
+    long_rows = []
+    for col_idx, col in enumerate(data.columns):
+        if col in ["Month", "Nature"]:
+            continue
+        if normalize_key(col) in ["GRANDTOTAL", "TOTAL"]:
+            continue
+        cfa_name = cfa_names[col_idx] if col_idx < len(cfa_names) else col
+        location = col
+        temp = data[["Month", "Nature", col]].copy()
+        temp = temp.rename(columns={col: "Expense Amount"})
+        temp["CFA Name"] = cfa_name
+        temp["CFA Location"] = location
+        temp["Expense Amount"] = to_number(temp["Expense Amount"])
+        long_rows.append(temp)
+    cfa_long = pd.concat(long_rows, ignore_index=True) if long_rows else pd.DataFrame()
+    cfa_long = cfa_long[cfa_long["Expense Amount"] != 0].copy()
+    cfa_long["CFA Match Key"] = cfa_long["CFA Name"].apply(normalize_key)
+
+    # Prepare reconciliation between Back Up received amount and C&FA expenses.
+    backup_cfa_base = backup.copy()
+    if "Transporter/CFA" in backup_cfa_base.columns:
+        name_col = "Transporter/CFA"
+        key_col = "Transporter CFA Match Key"
+    else:
+        name_col = "Transporter"
+        key_col = "Transporter Match Key"
+
+    backup_cfa_sum = (
+        backup_cfa_base.groupby([key_col, name_col], dropna=False)
+        .agg(
+            Backup_Freight=("Freight", "sum"),
+            Backup_Received_Bill=("Received Bill Amount", "sum"),
+            Backup_Net_Bill=("Net Bill", "sum"),
+            Invoice_Count=("Invoice No", "nunique") if "Invoice No" in backup.columns else ("Freight", "count"),
         )
-
-    if df["_Month_Date"].isna().all():
-        month_map = {
-            "jan": 1, "january": 1,
-            "feb": 2, "february": 2,
-            "mar": 3, "march": 3,
-            "apr": 4, "april": 4,
-            "may": 5,
-            "jun": 6, "june": 6,
-            "jul": 7, "july": 7,
-            "aug": 8, "august": 8,
-            "sep": 9, "sept": 9, "september": 9,
-            "oct": 10, "october": 10,
-            "nov": 11, "november": 11,
-            "dec": 12, "december": 12
-        }
-
-        temp_month = month_text.str.lower().str[:3].map(month_map)
-        df["_Month_Date"] = pd.to_datetime(
-            {
-                "year": 2026,
-                "month": temp_month.fillna(12),
-                "day": 1
-            },
-            errors="coerce"
-        )
-
-    df = df.sort_values("_Month_Date")
-
-    month_order = (
-        df.dropna(subset=["_Month_Date"])
-        .sort_values("_Month_Date")[month_col]
-        .astype(str)
-        .drop_duplicates()
-        .tolist()
-    )
-
-    if not month_order:
-        month_order = df[month_col].astype(str).drop_duplicates().tolist()
-
-    return df, month_order
-
-
-def get_top_table(df, group_col, value_cols, top_n=20):
-    if not group_col or group_col not in df.columns:
-        return pd.DataFrame()
-
-    available_values = [c for c in value_cols if c in df.columns]
-
-    if not available_values:
-        return pd.DataFrame()
-
-    out = (
-        df.groupby(group_col, dropna=False)[available_values]
-        .sum()
         .reset_index()
-        .sort_values(available_values[0], ascending=False)
-        .head(top_n)
+        .rename(columns={key_col: "Match Key", name_col: "Back Up Transporter/CFA"})
     )
 
+    cfa_sum = (
+        cfa_long.groupby(["CFA Match Key", "CFA Name"], dropna=False)
+        .agg(CFA_Expense=("Expense Amount", "sum"))
+        .reset_index()
+        .rename(columns={"CFA Match Key": "Match Key"})
+    )
+
+    recon = backup_cfa_sum.merge(cfa_sum, on="Match Key", how="outer")
+    recon["Back Up Transporter/CFA"] = recon["Back Up Transporter/CFA"].fillna("")
+    recon["CFA Name"] = recon["CFA Name"].fillna("")
+    for c in ["Backup_Freight", "Backup_Received_Bill", "Backup_Net_Bill", "Invoice_Count", "CFA_Expense"]:
+        recon[c] = recon[c].fillna(0)
+    recon["CFA Expense vs Received Bill Variance"] = recon["CFA_Expense"] - recon["Backup_Received_Bill"]
+    recon["CFA Expense vs Freight Variance"] = recon["CFA_Expense"] - recon["Backup_Freight"]
+
+    return backup, cfa_long, recon
+
+
+def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
+    out = df.copy()
+    for col, selected in filters.items():
+        if col in out.columns and selected:
+            out = out[out[col].astype(str).isin(selected)]
     return out
 
 
-def create_download_excel(dataframes_dict):
-    output = BytesIO()
-
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        for sheet_name, data in dataframes_dict.items():
-            safe_sheet = str(sheet_name)[:31]
-            data.to_excel(writer, sheet_name=safe_sheet, index=False)
-
-    output.seek(0)
-    return output
+def multi_filter(label: str, df: pd.DataFrame, col: str):
+    if col not in df.columns:
+        return []
+    options = sorted([x for x in df[col].dropna().astype(str).unique().tolist() if x and x.lower() != "nan"])
+    return st.sidebar.multiselect(label, options=options, default=[])
 
 
-def show_metric_card(label, value, small_text=""):
+def make_bar(df, x, y, title, color=None, orientation="v", text_auto=True):
+    if df.empty:
+        st.info("No data available for this chart based on current filters.")
+        return
+    fig = px.bar(df, x=x, y=y, title=title, color=color, orientation=orientation, text_auto=text_auto)
+    fig.update_layout(
+        title_font_size=18,
+        margin=dict(l=15, r=15, t=55, b=15),
+        height=430,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend_title_text="",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def make_line(df, x, y, title, color=None):
+    if df.empty:
+        st.info("No data available for this chart based on current filters.")
+        return
+    fig = px.line(df, x=x, y=y, title=title, color=color, markers=True)
+    fig.update_layout(
+        title_font_size=18,
+        margin=dict(l=15, r=15, t=55, b=15),
+        height=420,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend_title_text="",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def show_metric_card(title: str, value: str, note: str = ""):
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-label">{label}</div>
+            <div class="metric-title">{title}</div>
             <div class="metric-value">{value}</div>
-            <div class="metric-small">{small_text}</div>
+            <div class="metric-note">{note}</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
-# =========================================================
-# FILE READING
-# =========================================================
-
-@st.cache_data(show_spinner=False)
-def read_uploaded_file(uploaded_file):
-    suffix = uploaded_file.name.split(".")[-1].lower()
-
-    if suffix == "xlsb":
-        backup_df = pd.read_excel(
-            uploaded_file,
-            sheet_name="Back Up",
-            engine="pyxlsb"
-        )
-
-        cfa_df = pd.read_excel(
-            uploaded_file,
-            sheet_name="C&FA-Exp",
-            engine="pyxlsb"
-        )
-
-    else:
-        backup_df = pd.read_excel(
-            uploaded_file,
-            sheet_name="Back Up"
-        )
-
-        cfa_df = pd.read_excel(
-            uploaded_file,
-            sheet_name="C&FA-Exp"
-        )
-
-    backup_df = clean_dataframe_columns(backup_df)
-    cfa_df = clean_dataframe_columns(cfa_df)
-
-    return backup_df, cfa_df
-
-
-# =========================================================
-# DATA PREPARATION
-# =========================================================
-
-def prepare_backup_data(df):
-    df = df.copy()
-    df = make_month_from_date(df)
-
-    net_bill_col = safe_find_column(
-        df,
-        [
-            "Net Bill",
-            "Net_Bill",
-            "NetBilling",
-            "Net Billing",
-            "Net Sales",
-            "Net_Sales",
-            "Billing",
-            "Bill Amount"
-        ]
+def download_excel_button(sheets: dict, file_name: str):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        for sheet, data in sheets.items():
+            safe_sheet = sheet[:31]
+            data.to_excel(writer, index=False, sheet_name=safe_sheet)
+            worksheet = writer.sheets[safe_sheet]
+            for idx, col in enumerate(data.columns):
+                width = min(max(len(str(col)) + 2, 12), 35)
+                worksheet.set_column(idx, idx, width)
+    st.download_button(
+        label="⬇️ Download Filtered Report in Excel",
+        data=output.getvalue(),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    freight_col = safe_find_column(
-        df,
-        [
-            "Freight",
-            "Freight Amount",
-            "Freight_Amount",
-            "Transporter Freight",
-            "Transporter_Freight",
-            "Freight Expenses",
-            "Freight_Expenses"
-        ]
-    )
 
-    received_bill_col = safe_find_column(
-        df,
-        [
-            "Received Bill",
-            "Received_Bill",
-            "Bill Received",
-            "Bill_Received",
-            "Transporter Bill",
-            "Transporter_Bill"
-        ]
-    )
-
-    loading_col = safe_find_column(
-        df,
-        [
-            "Loading",
-            "Loading Charges",
-            "Loading_Charges",
-            "Loading Cost"
-        ]
-    )
-
-    unloading_col = safe_find_column(
-        df,
-        [
-            "Unloading",
-            "Unloading Charges",
-            "Unloading_Charges",
-            "Unloading Cost"
-        ]
-    )
-
-    transporter_col = safe_find_column(
-        df,
-        [
-            "Transporter Name",
-            "Transporter_Name",
-            "Transporter",
-            "Name Transporter",
-            "Name_Transporter"
-        ]
-    )
-
-    vertical_col = safe_find_column(
-        df,
-        [
-            "Sales Verticle",
-            "Sales Vertical",
-            "Sales_Verticle",
-            "Sales_Vertical",
-            "Vertical"
-        ]
-    )
-
-    state_col = safe_find_column(
-        df,
-        [
-            "State",
-            "Customer State",
-            "Customer_State",
-            "Ship State",
-            "Ship_State"
-        ]
-    )
-
-    zone_col = safe_find_column(
-        df,
-        [
-            "Zone",
-            "Region",
-            "Sales Zone",
-            "Sales_Zone"
-        ]
-    )
-
-    plant_col = safe_find_column(
-        df,
-        [
-            "Plant",
-            "Plant Code",
-            "Plant_Code",
-            "Warehouse",
-            "WH"
-        ]
-    )
-
-    city_col = safe_find_column(
-        df,
-        [
-            "City",
-            "Customer City",
-            "Ship City",
-            "Destination City"
-        ]
-    )
-
-    rename_map = {}
-
-    if net_bill_col:
-        rename_map[net_bill_col] = "Net_Bill"
-    if freight_col:
-        rename_map[freight_col] = "Freight"
-    if received_bill_col:
-        rename_map[received_bill_col] = "Received_Bill"
-    if loading_col:
-        rename_map[loading_col] = "Loading"
-    if unloading_col:
-        rename_map[unloading_col] = "Unloading"
-    if transporter_col:
-        rename_map[transporter_col] = "Transporter_Name"
-    if vertical_col:
-        rename_map[vertical_col] = "Sales_Vertical"
-    if state_col:
-        rename_map[state_col] = "State"
-    if zone_col:
-        rename_map[zone_col] = "Zone"
-    if plant_col:
-        rename_map[plant_col] = "Plant"
-    if city_col:
-        rename_map[city_col] = "City"
-
-    df = df.rename(columns=rename_map)
-
-    for col in ["Net_Bill", "Freight", "Received_Bill", "Loading", "Unloading"]:
-        if col not in df.columns:
-            df[col] = 0
-        df[col] = to_number(df[col])
-
-    for col in ["Transporter_Name", "Sales_Vertical", "State", "Zone", "Plant", "City"]:
-        if col not in df.columns:
-            df[col] = "Not Available"
-        df[col] = df[col].astype(str).str.strip().replace(["", "nan", "None"], "Not Available")
-
-    df["Bill_Variance"] = df["Received_Bill"] - df["Freight"]
-
-    df["Freight_Percent"] = np.where(
-        df["Net_Bill"] != 0,
-        df["Freight"] / df["Net_Bill"] * 100,
-        0
-    )
-
-    df["Loading_Unloading"] = df["Loading"] + df["Unloading"]
-
-    df["Total_Logistic_Cost"] = (
-        df["Freight"]
-        + df["Loading"]
-        + df["Unloading"]
-    )
-
-    df["Logistic_Cost_Percent"] = np.where(
-        df["Net_Bill"] != 0,
-        df["Total_Logistic_Cost"] / df["Net_Bill"] * 100,
-        0
-    )
-
-    return df
-
-
-def prepare_cfa_data(df):
-    df = df.copy()
-    df = make_month_from_date(df)
-
-    cfa_col = safe_find_column(
-        df,
-        [
-            "CFA",
-            "C&FA",
-            "C and FA",
-            "CFA Name",
-            "CFA_Name",
-            "C&FA Name",
-            "C&FA_Name",
-            "CFA Wise Names",
-            "CFA_Wise_Names",
-            "Name"
-        ]
-    )
-
-    nature_col = safe_find_column(
-        df,
-        [
-            "Nature of Expense",
-            "Nature_of_Expense",
-            "Expense Nature",
-            "Expense_Nature",
-            "Nature",
-            "Expense Type",
-            "Expense_Type"
-        ]
-    )
-
-    amount_col = safe_find_column(
-        df,
-        [
-            "Amount",
-            "Expense Amount",
-            "Expense_Amount",
-            "Value",
-            "Total",
-            "Total Amount",
-            "Total_Amount"
-        ]
-    )
-
-    location_col = safe_find_column(
-        df,
-        [
-            "Location",
-            "City",
-            "Place",
-            "Branch",
-            "Depot"
-        ]
-    )
-
-    rename_map = {}
-
-    if cfa_col:
-        rename_map[cfa_col] = "CFA_Name"
-    if nature_col:
-        rename_map[nature_col] = "Nature_of_Expense"
-    if amount_col:
-        rename_map[amount_col] = "Expense_Amount"
-    if location_col:
-        rename_map[location_col] = "Location"
-
-    df = df.rename(columns=rename_map)
-
-    if "CFA_Name" not in df.columns:
-        df["CFA_Name"] = "Not Available"
-
-    if "Nature_of_Expense" not in df.columns:
-        df["Nature_of_Expense"] = "Not Available"
-
-    if "Expense_Amount" not in df.columns:
-        df["Expense_Amount"] = 0
-
-    if "Location" not in df.columns:
-        df["Location"] = "Not Available"
-
-    df["CFA_Name"] = df["CFA_Name"].astype(str).str.strip().replace(["", "nan", "None"], "Not Available")
-    df["Nature_of_Expense"] = df["Nature_of_Expense"].astype(str).str.strip().replace(["", "nan", "None"], "Not Available")
-    df["Location"] = df["Location"].astype(str).str.strip().replace(["", "nan", "None"], "Not Available")
-    df["Expense_Amount"] = to_number(df["Expense_Amount"])
-
-    return df
-
-
-# =========================================================
-# HEADER
-# =========================================================
-
-st.markdown('<div class="main-title">🚚 Freight Analysis Dashboard</div>', unsafe_allow_html=True)
+# -----------------------------
+# Header
+# -----------------------------
 st.markdown(
-    '<div class="sub-title">Back Up Sheet vs C&FA Expense Sheet | Net Bill, Freight, Received Bill, Transporter, Sales Vertical, State, Zone and C&FA Expense Analysis</div>',
-    unsafe_allow_html=True
+    """
+    <div class="hero-box">
+        <div class="hero-title">🚚 Freight Analysis & C&FA Expense Control Tower</div>
+        <div class="hero-subtitle">
+            Analyze Net Bill vs Freight, Received Bill, Sales Vertical, State, Zone, Transporter and C&FA nature-wise expenses from Back Up and C&FA-Exp sheets.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-# =========================================================
-# UPLOAD FILE
-# =========================================================
 
-uploaded_file = st.file_uploader(
-    "Upload Freight Excel File",
-    type=["xlsb", "xlsx", "xls"]
+# -----------------------------
+# Upload
+# -----------------------------
+st.sidebar.header("📂 Upload Workbook")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Excel file (.xlsb / .xlsx / .xlsm)",
+    type=["xlsb", "xlsx", "xlsm", "xls"],
 )
 
-if uploaded_file is None:
-    st.info("Please upload your freight file containing sheets named 'Back Up' and 'C&FA-Exp'.")
+if not uploaded_file:
+    st.info("Please upload the Freight Provision workbook containing sheets named **Back Up** and **C&FA-Exp**.")
     st.stop()
 
 try:
-    raw_backup_df, raw_cfa_df = read_uploaded_file(uploaded_file)
+    backup_df, cfa_df, recon_df = load_and_prepare(uploaded_file.getvalue(), uploaded_file.name)
 except Exception as e:
-    st.error("Unable to read the uploaded file. Please check sheet names: 'Back Up' and 'C&FA-Exp'.")
-    st.exception(e)
+    st.error(f"Unable to process workbook: {e}")
     st.stop()
 
-backup_df = prepare_backup_data(raw_backup_df)
-cfa_df = prepare_cfa_data(raw_cfa_df)
 
-# =========================================================
-# SIDEBAR FILTERS
-# =========================================================
+# -----------------------------
+# Sidebar Filters
+# -----------------------------
+st.sidebar.header("🔎 Filters")
+filters = {
+    "Month": multi_filter("Month", backup_df, "Month"),
+    "Sales Verticle": multi_filter("Sales Vertical", backup_df, "Sales Verticle"),
+    "Zone": multi_filter("Zone", backup_df, "Zone"),
+    "State": multi_filter("State", backup_df, "State"),
+    "Plant Name": multi_filter("Plant", backup_df, "Plant Name"),
+    "Transporter": multi_filter("Transporter", backup_df, "Transporter"),
+    "Expense type": multi_filter("Expense Type", backup_df, "Expense type"),
+}
+filtered = apply_filters(backup_df, filters)
 
-st.sidebar.header("🔎 Dashboard Filters")
+# C&FA filters separately
+st.sidebar.header("🏢 C&FA Filters")
+cfa_months = multi_filter("C&FA Month", cfa_df, "Month")
+cfa_names = multi_filter("C&FA Name", cfa_df, "CFA Name")
+cfa_natures = multi_filter("Expense Nature", cfa_df, "Nature")
+cfa_filtered = apply_filters(cfa_df, {"Month": cfa_months, "CFA Name": cfa_names, "Nature": cfa_natures})
 
-month_list_df, month_order_all = fix_month_order(
-    backup_df[["Month"]].drop_duplicates(),
-    "Month"
-)
 
-month_options = month_order_all
+# -----------------------------
+# KPIs
+# -----------------------------
+st.markdown('<div class="section-title">Executive Summary</div>', unsafe_allow_html=True)
 
-selected_months = st.sidebar.multiselect(
-    "Select Month",
-    options=month_options,
-    default=month_options
-)
+net_bill = filtered["Net Bill"].sum() if "Net Bill" in filtered.columns else 0
+freight = filtered["Freight"].sum() if "Freight" in filtered.columns else 0
+received = filtered["Received Bill Amount"].sum() if "Received Bill Amount" in filtered.columns else 0
+loading_unloading = filtered["Loading + Unloading"].sum() if "Loading + Unloading" in filtered.columns else 0
+total_log_cost = filtered["Total Logistic Cost"].sum() if "Total Logistic Cost" in filtered.columns else 0
+freight_percent = safe_div(freight, net_bill) * 100
+variance = received - freight
+invoice_count = filtered["Invoice No"].nunique() if "Invoice No" in filtered.columns else len(filtered)
+transporter_count = filtered["Transporter"].nunique() if "Transporter" in filtered.columns else 0
 
-selected_verticals = st.sidebar.multiselect(
-    "Select Sales Vertical",
-    options=sorted(backup_df["Sales_Vertical"].dropna().unique().tolist()),
-    default=sorted(backup_df["Sales_Vertical"].dropna().unique().tolist())
-)
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    show_metric_card("Net Bill", fmt_inr(net_bill), f"Invoices: {fmt_num(invoice_count)}")
+with k2:
+    show_metric_card("Freight", fmt_inr(freight), f"Freight % on Net Bill: {freight_percent:.2f}%")
+with k3:
+    show_metric_card("Received Bill", fmt_inr(received), f"Variance vs Freight: {fmt_inr(variance)}")
+with k4:
+    show_metric_card("Transporters", fmt_num(transporter_count), f"Loading + Unloading: {fmt_inr(loading_unloading)}")
 
-selected_states = st.sidebar.multiselect(
-    "Select State",
-    options=sorted(backup_df["State"].dropna().unique().tolist()),
-    default=sorted(backup_df["State"].dropna().unique().tolist())
-)
+k5, k6, k7, k8 = st.columns(4)
+with k5:
+    show_metric_card("Total Logistic Cost", fmt_inr(total_log_cost), "Freight + Loading + Unloading")
+with k6:
+    show_metric_card("Total Weight", fmt_num(filtered["Weight"].sum() if "Weight" in filtered.columns else 0), "As per Back Up sheet")
+with k7:
+    show_metric_card("Total Boxes", fmt_num(filtered["Box"].sum() if "Box" in filtered.columns else 0), "As per Back Up sheet")
+with k8:
+    show_metric_card("C&FA Expense", fmt_inr(cfa_filtered["Expense Amount"].sum() if not cfa_filtered.empty else 0), "As per C&FA-Exp sheet")
 
-selected_zones = st.sidebar.multiselect(
-    "Select Zone",
-    options=sorted(backup_df["Zone"].dropna().unique().tolist()),
-    default=sorted(backup_df["Zone"].dropna().unique().tolist())
-)
 
-selected_transporters = st.sidebar.multiselect(
-    "Select Transporter",
-    options=sorted(backup_df["Transporter_Name"].dropna().unique().tolist()),
-    default=sorted(backup_df["Transporter_Name"].dropna().unique().tolist())
-)
+# -----------------------------
+# Tabs
+# -----------------------------
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📊 Freight Dashboard",
+    "🚛 Transporter Analysis",
+    "🌍 Sales / State / Zone",
+    "🏢 C&FA Expense Analysis",
+    "🔁 C&FA Reconciliation",
+    "📄 Data & Download",
+])
 
-filtered_backup_df = backup_df[
-    backup_df["Month"].isin(selected_months)
-    & backup_df["Sales_Vertical"].isin(selected_verticals)
-    & backup_df["State"].isin(selected_states)
-    & backup_df["Zone"].isin(selected_zones)
-    & backup_df["Transporter_Name"].isin(selected_transporters)
-].copy()
-
-filtered_cfa_df = cfa_df[
-    cfa_df["Month"].isin(selected_months)
-].copy()
-
-# =========================================================
-# KPI CALCULATION
-# =========================================================
-
-total_net_bill = filtered_backup_df["Net_Bill"].sum()
-total_freight = filtered_backup_df["Freight"].sum()
-total_received_bill = filtered_backup_df["Received_Bill"].sum()
-total_variance = filtered_backup_df["Bill_Variance"].sum()
-total_loading_unloading = filtered_backup_df["Loading_Unloading"].sum()
-total_logistic_cost = filtered_backup_df["Total_Logistic_Cost"].sum()
-total_cfa_expense = filtered_cfa_df["Expense_Amount"].sum()
-
-freight_percent = (total_freight / total_net_bill * 100) if total_net_bill else 0
-logistic_percent = (total_logistic_cost / total_net_bill * 100) if total_net_bill else 0
-cfa_percent = (total_cfa_expense / total_net_bill * 100) if total_net_bill else 0
-
-# =========================================================
-# KPI CARDS
-# =========================================================
-
-st.markdown('<div class="section-title">📌 Freight Summary</div>', unsafe_allow_html=True)
-
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-
-with kpi1:
-    show_metric_card("Net Bill", format_inr(total_net_bill), "Total billing value")
-
-with kpi2:
-    show_metric_card("Freight Expense", format_inr(total_freight), f"{freight_percent:.2f}% of Net Bill")
-
-with kpi3:
-    show_metric_card("Received Bill", format_inr(total_received_bill), "Transporter bill received")
-
-with kpi4:
-    show_metric_card("Bill Variance", format_inr(total_variance), "Received Bill - Freight")
-
-kpi5, kpi6, kpi7, kpi8 = st.columns(4)
-
-with kpi5:
-    show_metric_card("Loading + Unloading", format_inr(total_loading_unloading), "Additional logistic cost")
-
-with kpi6:
-    show_metric_card("Total Logistic Cost", format_inr(total_logistic_cost), f"{logistic_percent:.2f}% of Net Bill")
-
-with kpi7:
-    show_metric_card("C&FA Expense", format_inr(total_cfa_expense), f"{cfa_percent:.2f}% of Net Bill")
-
-with kpi8:
-    show_metric_card("Total Records", f"{len(filtered_backup_df):,}", "Back Up sheet records")
-
-# =========================================================
-# TABS
-# =========================================================
-
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    [
-        "📊 Freight Overview",
-        "🚚 Transporter Analysis",
-        "🏢 Sales Vertical / State / Zone",
-        "🏬 C&FA Expense",
-        "🔁 Reconciliation",
-        "📄 Data & Download"
-    ]
-)
-
-# =========================================================
-# TAB 1 - FREIGHT OVERVIEW
-# =========================================================
 
 with tab1:
     st.markdown('<div class="section-title">Freight Overview</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
 
-    month_summary = (
-        filtered_backup_df
-        .groupby("Month", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Bill_Variance=("Bill_Variance", "sum"),
-            Loading_Unloading=("Loading_Unloading", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
+    if "Month" in filtered.columns:
+        monthly = (
+            filtered.groupby("Month", dropna=False)
+            .agg(Net_Bill=("Net Bill", "sum"), Freight=("Freight", "sum"), Received_Bill=("Received Bill Amount", "sum"))
+            .reset_index()
         )
-        .reset_index()
-    )
+        monthly["Freight %"] = np.where(monthly["Net_Bill"] != 0, monthly["Freight"] / monthly["Net_Bill"] * 100, 0)
+    else:
+        monthly = pd.DataFrame()
 
-    month_summary["Freight_Percent"] = np.where(
-        month_summary["Net_Bill"] != 0,
-        month_summary["Freight"] / month_summary["Net_Bill"] * 100,
-        0
-    )
+    with c1:
+        if not monthly.empty:
+            plot_df = monthly.melt(id_vars="Month", value_vars=["Net_Bill", "Freight", "Received_Bill"], var_name="Metric", value_name="Amount")
+            make_bar(plot_df, "Month", "Amount", "Month-wise Net Bill vs Freight vs Received Bill", color="Metric")
+    with c2:
+        if not monthly.empty:
+            make_line(monthly, "Month", "Freight %", "Month-wise Freight % on Net Bill")
 
-    month_summary["Logistic_Cost_Percent"] = np.where(
-        month_summary["Net_Bill"] != 0,
-        month_summary["Total_Logistic_Cost"] / month_summary["Net_Bill"] * 100,
-        0
-    )
+    c3, c4 = st.columns(2)
+    with c3:
+        top_state = filtered.groupby("State", dropna=False).agg(Freight=("Freight", "sum")).reset_index().sort_values("Freight", ascending=False).head(15) if "State" in filtered.columns else pd.DataFrame()
+        make_bar(top_state, "State", "Freight", "Top States by Freight")
+    with c4:
+        top_zone = filtered.groupby("Zone", dropna=False).agg(Freight=("Freight", "sum")).reset_index().sort_values("Freight", ascending=False) if "Zone" in filtered.columns else pd.DataFrame()
+        make_bar(top_zone, "Zone", "Freight", "Zone-wise Freight")
 
-    month_summary, month_order = fix_month_order(month_summary, "Month")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.bar(
-            month_summary,
-            x="Month",
-            y=["Net_Bill", "Freight", "Received_Bill"],
-            barmode="group",
-            title="Month-wise Net Bill vs Freight vs Received Bill",
-            text_auto=".3s",
-            category_orders={"Month": month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Amount",
-            legend_title_text="Particulars"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.line(
-            month_summary,
-            x="Month",
-            y="Freight_Percent",
-            markers=True,
-            title="Month-wise Freight % on Net Bill",
-            category_orders={"Month": month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Freight %"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        fig = px.bar(
-            month_summary,
-            x="Month",
-            y=["Loading_Unloading", "Total_Logistic_Cost"],
-            barmode="group",
-            title="Month-wise Loading/Unloading and Total Logistic Cost",
-            text_auto=".3s",
-            category_orders={"Month": month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Amount",
-            legend_title_text="Particulars"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col4:
-        fig = px.line(
-            month_summary,
-            x="Month",
-            y="Logistic_Cost_Percent",
-            markers=True,
-            title="Month-wise Total Logistic Cost % on Net Bill",
-            category_orders={"Month": month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Total Logistic Cost %"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(month_summary.drop(columns=["_Month_Date"], errors="ignore"), use_container_width=True)
-
-# =========================================================
-# TAB 2 - TRANSPORTER ANALYSIS
-# =========================================================
 
 with tab2:
-    st.markdown('<div class="section-title">Transporter Wise Analysis</div>', unsafe_allow_html=True)
-
-    transporter_summary = (
-        filtered_backup_df
-        .groupby("Transporter_Name", dropna=False)
+    st.markdown('<div class="section-title">Transporter Performance Analysis</div>', unsafe_allow_html=True)
+    transporter = (
+        filtered.groupby("Transporter", dropna=False)
         .agg(
-            Net_Bill=("Net_Bill", "sum"),
+            Net_Bill=("Net Bill", "sum"),
             Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Bill_Variance=("Bill_Variance", "sum"),
-            Loading_Unloading=("Loading_Unloading", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
+            Received_Bill=("Received Bill Amount", "sum"),
+            Loading=("Loading", "sum"),
+            Unloading=("Unloading", "sum"),
+            Weight=("Weight", "sum"),
+            Box=("Box", "sum"),
+            Invoice_Count=("Invoice No", "nunique") if "Invoice No" in filtered.columns else ("Freight", "count"),
         )
         .reset_index()
-    )
+        .sort_values("Freight", ascending=False)
+    ) if "Transporter" in filtered.columns else pd.DataFrame()
 
-    transporter_summary["Freight_Percent"] = np.where(
-        transporter_summary["Net_Bill"] != 0,
-        transporter_summary["Freight"] / transporter_summary["Net_Bill"] * 100,
-        0
-    )
+    if not transporter.empty:
+        transporter["Freight %"] = np.where(transporter["Net_Bill"] != 0, transporter["Freight"] / transporter["Net_Bill"] * 100, 0)
+        transporter["Received vs Freight Variance"] = transporter["Received_Bill"] - transporter["Freight"]
+        transporter["Freight per Kg"] = np.where(transporter["Weight"] != 0, transporter["Freight"] / transporter["Weight"], 0)
+        transporter["Freight per Box"] = np.where(transporter["Box"] != 0, transporter["Freight"] / transporter["Box"], 0)
 
-    transporter_summary = transporter_summary.sort_values("Freight", ascending=False)
+        c1, c2 = st.columns(2)
+        with c1:
+            make_bar(transporter.head(15), "Transporter", "Freight", "Top 15 Transporters by Freight")
+        with c2:
+            make_bar(transporter.head(15), "Transporter", "Received_Bill", "Top 15 Transporters by Received Bill")
 
-    col1, col2 = st.columns(2)
+        c3, c4 = st.columns(2)
+        with c3:
+            make_bar(transporter.sort_values("Received vs Freight Variance", ascending=False).head(15), "Transporter", "Received vs Freight Variance", "Highest Received Bill Variance")
+        with c4:
+            make_bar(transporter.sort_values("Freight %", ascending=False).head(15), "Transporter", "Freight %", "Highest Freight % Transporters")
 
-    with col1:
-        top_transporters = transporter_summary.head(20)
+        st.dataframe(transporter, use_container_width=True, hide_index=True)
+    else:
+        st.info("Transporter column not available in the Back Up sheet.")
 
-        fig = px.bar(
-            top_transporters,
-            x="Transporter_Name",
-            y="Freight",
-            title="Top Transporters by Freight Expense",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Transporter",
-            yaxis_title="Freight",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        top_variance = transporter_summary.sort_values("Bill_Variance", ascending=False).head(20)
-
-        fig = px.bar(
-            top_variance,
-            x="Transporter_Name",
-            y="Bill_Variance",
-            title="Top Transporters by Bill Variance",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Transporter",
-            yaxis_title="Variance",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        fig = px.bar(
-            transporter_summary.head(20),
-            x="Transporter_Name",
-            y=["Freight", "Received_Bill"],
-            barmode="group",
-            title="Transporter Freight vs Received Bill",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Transporter",
-            yaxis_title="Amount",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col4:
-        fig = px.bar(
-            transporter_summary.head(20),
-            x="Transporter_Name",
-            y="Freight_Percent",
-            title="Transporter Wise Freight % on Net Bill",
-            text_auto=".2f"
-        )
-
-        fig.update_layout(
-            xaxis_title="Transporter",
-            yaxis_title="Freight %",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(transporter_summary, use_container_width=True)
-
-# =========================================================
-# TAB 3 - SALES VERTICAL / STATE / ZONE
-# =========================================================
 
 with tab3:
-    st.markdown('<div class="section-title">Sales Vertical, State and Zone Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Sales Vertical, State, Zone and Plant Analysis</div>', unsafe_allow_html=True)
 
-    vertical_summary = (
-        filtered_backup_df
-        .groupby("Sales_Vertical", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-    )
+    c1, c2 = st.columns(2)
+    with c1:
+        vertical = filtered.groupby("Sales Verticle", dropna=False).agg(Net_Bill=("Net Bill", "sum"), Freight=("Freight", "sum"), Invoice_Count=("Invoice No", "nunique")).reset_index().sort_values("Freight", ascending=False) if "Sales Verticle" in filtered.columns else pd.DataFrame()
+        make_bar(vertical, "Sales Verticle", "Freight", "Sales Vertical-wise Freight")
+    with c2:
+        plant = filtered.groupby("Plant Name", dropna=False).agg(Net_Bill=("Net Bill", "sum"), Freight=("Freight", "sum"), Invoice_Count=("Invoice No", "nunique")).reset_index().sort_values("Freight", ascending=False) if "Plant Name" in filtered.columns else pd.DataFrame()
+        make_bar(plant, "Plant Name", "Freight", "Plant-wise Freight")
 
-    vertical_summary["Freight_Percent"] = np.where(
-        vertical_summary["Net_Bill"] != 0,
-        vertical_summary["Freight"] / vertical_summary["Net_Bill"] * 100,
-        0
-    )
+    c3, c4 = st.columns(2)
+    with c3:
+        bill_type = filtered.groupby("Billing Type", dropna=False).agg(Net_Bill=("Net Bill", "sum"), Freight=("Freight", "sum")).reset_index().sort_values("Freight", ascending=False) if "Billing Type" in filtered.columns else pd.DataFrame()
+        make_bar(bill_type, "Billing Type", "Freight", "Billing Type-wise Freight")
+    with c4:
+        exp_type = filtered.groupby("Expense type", dropna=False).agg(Freight=("Freight", "sum"), Received_Bill=("Received Bill Amount", "sum")).reset_index().sort_values("Freight", ascending=False) if "Expense type" in filtered.columns else pd.DataFrame()
+        if not exp_type.empty:
+            exp_plot = exp_type.melt(id_vars="Expense type", value_vars=["Freight", "Received_Bill"], var_name="Metric", value_name="Amount")
+            make_bar(exp_plot, "Expense type", "Amount", "Expense Type-wise Freight vs Received Bill", color="Metric")
 
-    vertical_summary = vertical_summary.sort_values("Freight", ascending=False)
+    if not vertical.empty:
+        vertical["Freight %"] = np.where(vertical["Net_Bill"] != 0, vertical["Freight"] / vertical["Net_Bill"] * 100, 0)
+        st.markdown("#### Sales Vertical Summary")
+        st.dataframe(vertical, use_container_width=True, hide_index=True)
 
-    state_summary = (
-        filtered_backup_df
-        .groupby("State", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-    )
-
-    state_summary["Freight_Percent"] = np.where(
-        state_summary["Net_Bill"] != 0,
-        state_summary["Freight"] / state_summary["Net_Bill"] * 100,
-        0
-    )
-
-    state_summary = state_summary.sort_values("Freight", ascending=False)
-
-    zone_summary = (
-        filtered_backup_df
-        .groupby("Zone", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-    )
-
-    zone_summary["Freight_Percent"] = np.where(
-        zone_summary["Net_Bill"] != 0,
-        zone_summary["Freight"] / zone_summary["Net_Bill"] * 100,
-        0
-    )
-
-    zone_summary = zone_summary.sort_values("Freight", ascending=False)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.bar(
-            vertical_summary,
-            x="Sales_Vertical",
-            y=["Net_Bill", "Freight"],
-            barmode="group",
-            title="Sales Vertical Wise Net Bill vs Freight",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Sales Vertical",
-            yaxis_title="Amount",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.pie(
-            vertical_summary,
-            names="Sales_Vertical",
-            values="Freight",
-            title="Sales Vertical Wise Freight Share"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        fig = px.bar(
-            state_summary.head(20),
-            x="State",
-            y="Freight",
-            title="Top State Wise Freight",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="State",
-            yaxis_title="Freight",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col4:
-        fig = px.bar(
-            zone_summary,
-            x="Zone",
-            y="Freight",
-            title="Zone Wise Freight",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Zone",
-            yaxis_title="Freight"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Sales Vertical Summary")
-    st.dataframe(vertical_summary, use_container_width=True)
-
-    st.subheader("State Summary")
-    st.dataframe(state_summary, use_container_width=True)
-
-    st.subheader("Zone Summary")
-    st.dataframe(zone_summary, use_container_width=True)
-
-# =========================================================
-# TAB 4 - CFA EXPENSE
-# =========================================================
 
 with tab4:
     st.markdown('<div class="section-title">C&FA Expense Analysis</div>', unsafe_allow_html=True)
+    if cfa_filtered.empty:
+        st.info("No C&FA expense data available for current filters.")
+    else:
+        c1, c2 = st.columns(2)
+        cfa_by_name = cfa_filtered.groupby("CFA Name", dropna=False).agg(Expense_Amount=("Expense Amount", "sum")).reset_index().sort_values("Expense_Amount", ascending=False)
+        cfa_by_nature = cfa_filtered.groupby("Nature", dropna=False).agg(Expense_Amount=("Expense Amount", "sum")).reset_index().sort_values("Expense_Amount", ascending=False)
+        with c1:
+            make_bar(cfa_by_name, "CFA Name", "Expense_Amount", "C&FA-wise Expense")
+        with c2:
+            make_bar(cfa_by_nature.head(20), "Nature", "Expense_Amount", "Nature-wise Expense")
 
-    cfa_month_summary = (
-        filtered_cfa_df
-        .groupby("Month", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-    )
+        c3, c4 = st.columns(2)
+        with c3:
+            cfa_month = cfa_filtered.groupby("Month", dropna=False).agg(Expense_Amount=("Expense Amount", "sum")).reset_index()
+            make_bar(cfa_month, "Month", "Expense_Amount", "Month-wise C&FA Expense")
+        with c4:
+            cfa_loc = cfa_filtered.groupby("CFA Location", dropna=False).agg(Expense_Amount=("Expense Amount", "sum")).reset_index().sort_values("Expense_Amount", ascending=False)
+            make_bar(cfa_loc, "CFA Location", "Expense_Amount", "Location-wise C&FA Expense")
 
-    cfa_month_summary, cfa_month_order = fix_month_order(cfa_month_summary, "Month")
+        st.markdown("#### C&FA Expense Detail")
+        st.dataframe(cfa_filtered, use_container_width=True, hide_index=True)
 
-    cfa_summary = (
-        filtered_cfa_df
-        .groupby("CFA_Name", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-        .sort_values("Expense_Amount", ascending=False)
-    )
-
-    nature_summary = (
-        filtered_cfa_df
-        .groupby("Nature_of_Expense", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-        .sort_values("Expense_Amount", ascending=False)
-    )
-
-    location_summary = (
-        filtered_cfa_df
-        .groupby("Location", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-        .sort_values("Expense_Amount", ascending=False)
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.bar(
-            cfa_month_summary,
-            x="Month",
-            y="Expense_Amount",
-            title="Month-wise C&FA Expense",
-            text_auto=".3s",
-            category_orders={"Month": cfa_month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Expense Amount"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.pie(
-            nature_summary,
-            names="Nature_of_Expense",
-            values="Expense_Amount",
-            title="Nature of Expense Wise C&FA Expense"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        fig = px.bar(
-            cfa_summary.head(20),
-            x="CFA_Name",
-            y="Expense_Amount",
-            title="Top C&FA Wise Expense",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="C&FA",
-            yaxis_title="Expense Amount",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col4:
-        fig = px.bar(
-            location_summary.head(20),
-            x="Location",
-            y="Expense_Amount",
-            title="Location Wise C&FA Expense",
-            text_auto=".3s"
-        )
-
-        fig.update_layout(
-            xaxis_title="Location",
-            yaxis_title="Expense Amount",
-            xaxis_tickangle=-45
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("C&FA Wise Summary")
-    st.dataframe(cfa_summary, use_container_width=True)
-
-    st.subheader("Nature of Expense Summary")
-    st.dataframe(nature_summary, use_container_width=True)
-
-    st.subheader("Location Wise Summary")
-    st.dataframe(location_summary, use_container_width=True)
-
-# =========================================================
-# TAB 5 - RECONCILIATION
-# =========================================================
 
 with tab5:
-    st.markdown('<div class="section-title">Back Up vs C&FA Expense Reconciliation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">C&FA vs Back Up Reconciliation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small-caption">This compares Back Up sheet transporter/CFA received bill and freight with the C&FA-Exp sheet expense amount using normalized names.</div>', unsafe_allow_html=True)
 
-    backup_month = (
-        filtered_backup_df
-        .groupby("Month", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Loading_Unloading=("Loading_Unloading", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-    )
+    display_recon = recon_df.copy()
+    # Optional: only show rows where there is at least one value.
+    display_recon = display_recon[(display_recon["Backup_Freight"] != 0) | (display_recon["Backup_Received_Bill"] != 0) | (display_recon["CFA_Expense"] != 0)]
+    display_recon = display_recon.sort_values("CFA Expense vs Received Bill Variance", ascending=False)
 
-    cfa_month = (
-        filtered_cfa_df
-        .groupby("Month", dropna=False)
-        .agg(
-            CFA_Expense=("Expense_Amount", "sum")
-        )
-        .reset_index()
-    )
+    c1, c2 = st.columns(2)
+    with c1:
+        make_bar(display_recon.head(20), "Back Up Transporter/CFA", "CFA Expense vs Received Bill Variance", "C&FA Expense vs Received Bill Variance - Top")
+    with c2:
+        make_bar(display_recon.sort_values("CFA_Expense", ascending=False).head(20), "CFA Name", "CFA_Expense", "Top C&FA Expenses as per C&FA-Exp")
 
-    recon_month = backup_month.merge(
-        cfa_month,
-        on="Month",
-        how="outer"
-    ).fillna(0)
+    st.dataframe(display_recon, use_container_width=True, hide_index=True)
 
-    recon_month["Total_Freight_Plus_CFA"] = recon_month["Total_Logistic_Cost"] + recon_month["CFA_Expense"]
-
-    recon_month["CFA_Percent_on_Net_Bill"] = np.where(
-        recon_month["Net_Bill"] != 0,
-        recon_month["CFA_Expense"] / recon_month["Net_Bill"] * 100,
-        0
-    )
-
-    recon_month["Total_Logistic_Plus_CFA_Percent"] = np.where(
-        recon_month["Net_Bill"] != 0,
-        recon_month["Total_Freight_Plus_CFA"] / recon_month["Net_Bill"] * 100,
-        0
-    )
-
-    recon_month, recon_month_order = fix_month_order(recon_month, "Month")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.bar(
-            recon_month,
-            x="Month",
-            y=["Total_Logistic_Cost", "CFA_Expense", "Total_Freight_Plus_CFA"],
-            barmode="group",
-            title="Month-wise Logistic Cost vs C&FA Expense",
-            text_auto=".3s",
-            category_orders={"Month": recon_month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Amount",
-            legend_title_text="Particulars"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.line(
-            recon_month,
-            x="Month",
-            y=["CFA_Percent_on_Net_Bill", "Total_Logistic_Plus_CFA_Percent"],
-            markers=True,
-            title="C&FA and Total Logistic + C&FA % on Net Bill",
-            category_orders={"Month": recon_month_order}
-        )
-
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Percentage"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(recon_month.drop(columns=["_Month_Date"], errors="ignore"), use_container_width=True)
-
-# =========================================================
-# TAB 6 - DATA & DOWNLOAD
-# =========================================================
 
 with tab6:
-    st.markdown('<div class="section-title">Data Preview and Download</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Data Preview & Export</div>', unsafe_allow_html=True)
+    st.markdown("#### Filtered Back Up Data")
+    st.dataframe(filtered, use_container_width=True, hide_index=True)
 
-    st.subheader("Filtered Back Up Data")
-    st.dataframe(filtered_backup_df, use_container_width=True)
+    st.markdown("#### Filtered C&FA Expense Data")
+    st.dataframe(cfa_filtered, use_container_width=True, hide_index=True)
 
-    st.subheader("Filtered C&FA Expense Data")
-    st.dataframe(filtered_cfa_df, use_container_width=True)
-
-    month_export = (
-        filtered_backup_df
-        .groupby("Month", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Bill_Variance=("Bill_Variance", "sum"),
-            Loading_Unloading=("Loading_Unloading", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-    )
-
-    month_export["Freight_Percent"] = np.where(
-        month_export["Net_Bill"] != 0,
-        month_export["Freight"] / month_export["Net_Bill"] * 100,
-        0
-    )
-
-    month_export, _ = fix_month_order(month_export, "Month")
-    month_export = month_export.drop(columns=["_Month_Date"], errors="ignore")
-
-    transporter_export = (
-        filtered_backup_df
-        .groupby("Transporter_Name", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Bill_Variance=("Bill_Variance", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-        .sort_values("Freight", ascending=False)
-    )
-
-    vertical_export = (
-        filtered_backup_df
-        .groupby("Sales_Vertical", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-        .sort_values("Freight", ascending=False)
-    )
-
-    state_export = (
-        filtered_backup_df
-        .groupby("State", dropna=False)
-        .agg(
-            Net_Bill=("Net_Bill", "sum"),
-            Freight=("Freight", "sum"),
-            Received_Bill=("Received_Bill", "sum"),
-            Total_Logistic_Cost=("Total_Logistic_Cost", "sum")
-        )
-        .reset_index()
-        .sort_values("Freight", ascending=False)
-    )
-
-    cfa_export = (
-        filtered_cfa_df
-        .groupby("CFA_Name", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-        .sort_values("Expense_Amount", ascending=False)
-    )
-
-    nature_export = (
-        filtered_cfa_df
-        .groupby("Nature_of_Expense", dropna=False)
-        .agg(
-            Expense_Amount=("Expense_Amount", "sum")
-        )
-        .reset_index()
-        .sort_values("Expense_Amount", ascending=False)
-    )
-
-    export_file = create_download_excel(
+    download_excel_button(
         {
-            "Month Summary": month_export,
-            "Transporter Summary": transporter_export,
-            "Vertical Summary": vertical_export,
-            "State Summary": state_export,
-            "CFA Summary": cfa_export,
-            "Nature Expense Summary": nature_export,
-            "Filtered Back Up": filtered_backup_df,
-            "Filtered CFA Expense": filtered_cfa_df
-        }
+            "Filtered Back Up": filtered,
+            "Filtered CFA Expense": cfa_filtered,
+            "CFA Reconciliation": recon_df,
+        },
+        "Freight_Analysis_Filtered_Report.xlsx",
     )
 
-    st.download_button(
-        label="📥 Download Freight Analysis Report",
-        data=export_file,
-        file_name="Freight_Analysis_Report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
 
-# =========================================================
-# FOOTER
-# =========================================================
-
-st.markdown("---")
-st.caption("Freight Analysis Dashboard | Developed for detailed Back Up and C&FA Expense Analysis")
+# -----------------------------
+# Footer
+# -----------------------------
+st.caption("Dashboard logic: Back Up sheet = freight, billing, transporter and sales analysis. C&FA-Exp sheet = C&FA name/location/nature-wise expense analysis.")
