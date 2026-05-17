@@ -405,6 +405,15 @@ def fix_month_order(df: pd.DataFrame, month_col: str = "Month") -> Tuple[pd.Data
 
 
 def is_stock_transfer_row(df: pd.DataFrame) -> pd.Series:
+    """
+    Identify Stock Transfer rows only from business classification fields.
+
+    Important:
+    Do NOT scan Party / Transporter / CFA name fields here. Some party names
+    or transporter names may contain words that look like classification words,
+    which can wrongly exclude genuine sales vertical values.
+    """
+
     mask = pd.Series(False, index=df.index)
 
     possible_cols = [
@@ -412,32 +421,37 @@ def is_stock_transfer_row(df: pd.DataFrame) -> pd.Series:
         "Sales Verticle",
         "Sales Vertical",
         "Expense type",
-        "TXTSold-to party",
-        "Party Code",
-        "Transporter/CFA",
-        "Transporter",
     ]
 
-    stock_keywords = [
-        "STOCK TRANSFER",
+    stock_keys = [
         "STOCKTRANSFER",
-        "STOCK TRF",
-        "STK TRANSFER",
-        "BRANCH TRANSFER",
+        "STOCKTRF",
+        "STKTRANSFER",
+        "BRANCHTRANSFER",
+        "INTERPLANTTRANSFER",
+        "INTERUNITTRANSFER",
         "STO",
     ]
 
     for col in possible_cols:
         if col in df.columns:
-            text = df[col].astype(str).str.upper().str.strip()
-
-            for keyword in stock_keywords:
-                mask = mask | text.str.contains(keyword, na=False)
+            key = df[col].apply(normalize_key)
+            mask = mask | key.isin(stock_keys)
+            mask = mask | key.str.contains("STOCKTRANSFER|BRANCHTRANSFER|INTERPLANTTRANSFER|INTERUNITTRANSFER", na=False)
 
     return mask
 
 
 def is_misc_others_row(df: pd.DataFrame) -> pd.Series:
+    """
+    Identify Misc/Others rows only from business classification fields.
+
+    Earlier logic used broad contains('OTHER') across party/transporter fields.
+    That can wrongly mark genuine Sales Verticals as excluded and distort
+    vertical-wise Net Sales. This version uses exact normalized classification
+    labels only.
+    """
+
     mask = pd.Series(False, index=df.index)
 
     possible_cols = [
@@ -445,30 +459,62 @@ def is_misc_others_row(df: pd.DataFrame) -> pd.Series:
         "Sales Verticle",
         "Sales Vertical",
         "Expense type",
-        "TXTSold-to party",
-        "Party Code",
-        "Transporter/CFA",
-        "Transporter",
     ]
 
-    misc_keywords = [
+    misc_keys = [
         "MISC",
         "MISCELLANEOUS",
         "OTHERS",
         "OTHER",
-        "OTHER SALES",
-        "MISC / OTHERS",
-        "MISC/OTHERS",
+        "OTHERSALES",
+        "OTHERSALE",
+        "MISCOTHERS",
+        "MISCOTHER",
+        "MISCELLANEOUSOTHERS",
     ]
 
     for col in possible_cols:
         if col in df.columns:
-            text = df[col].astype(str).str.upper().str.strip()
-
-            for keyword in misc_keywords:
-                mask = mask | text.str.contains(keyword, na=False)
+            key = df[col].apply(normalize_key)
+            mask = mask | key.isin(misc_keys)
 
     return mask
+
+
+def standardize_sales_vertical_value(value) -> str:
+    """Keep Sales Vertical names consistent for filters and summary tables."""
+
+    if pd.isna(value):
+        return "Not Available"
+
+    text = str(value).strip()
+
+    if not text or text.lower() == "nan":
+        return "Not Available"
+
+    key = normalize_key(text)
+
+    vertical_map = {
+        "CBBB2B": "CBB / B2B",
+        "CBBANDB2B": "CBB / B2B",
+        "B2BCBB": "CBB / B2B",
+        "GENERALTRADE": "General Trade",
+        "GT": "General Trade",
+        "GOVTBUSINESS": "Govt. Business",
+        "GOVERNMENTBUSINESS": "Govt. Business",
+        "GOVT": "Govt. Business",
+        "SECONDSALE": "Second Sale",
+        "SECONDARYSALE": "Second Sale",
+        "STOCKTRANSFER": "Stock Transfer",
+        "STOCKTRF": "Stock Transfer",
+        "STKTRANSFER": "Stock Transfer",
+        "MISCOTHERS": "Misc / Others",
+        "MISCOTHER": "Misc / Others",
+        "OTHERS": "Misc / Others",
+        "OTHER": "Misc / Others",
+    }
+
+    return vertical_map.get(key, text)
 
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
@@ -764,6 +810,12 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     for col in default_text_cols:
         if col not in backup.columns:
             backup[col] = "Not Available"
+
+    # Keep original vertical for audit and standardize the visible/grouping vertical.
+    # This prevents the same vertical from splitting due to spelling/spacing variants
+    # like CBB/B2B, CBB / B2B, General trade, Govt Business, etc.
+    backup["Sales Verticle Original"] = backup["Sales Verticle"]
+    backup["Sales Verticle"] = backup["Sales Verticle"].apply(standardize_sales_vertical_value)
 
     # ------------------------------------------------------------
     # Net Sales Correction
