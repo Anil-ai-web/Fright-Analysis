@@ -4,16 +4,16 @@
 # 1. Back Up
 # 2. C&FA-Exp
 #
-# Full Project Code - Updated Version
-# - Net Sales corrected
-# - Negative values preserved
+# Final Full Version:
+# - Only one Net Sales KPI
+# - Net Sales excludes Stock Transfer and Misc/Others
+# - Freight includes Stock Transfer and Misc/Others freight
+# - Freight % = Total Freight / Net Sales excluding ST and Misc/Others
+# - C&FA Expense % uses same Net Sales logic
 # - C&FA Grand Total rows/columns removed
 # - Month order fixed
-# - Values shown in Lakhs / Crores
-# - Net Sales without Stock Transfer added
-# - Freight % calculated on Net Sales without Stock Transfer,
-#   while freight includes total freight including stock transfer freight
-# - C&FA Expense % on Net Sales added
+# - Lakhs/Crores labels in charts
+# - Full C&FA Expense Analysis and Reconciliation included
 # ============================================================
 
 import re
@@ -166,7 +166,6 @@ def show_plotly(fig):
 # ============================================================
 
 def clean_col_name(x) -> str:
-    """Clean Excel column headers into stable strings."""
     if pd.isna(x):
         return ""
 
@@ -177,7 +176,6 @@ def clean_col_name(x) -> str:
 
 
 def normalize_key(x) -> str:
-    """Create a matching key for names/headers."""
     if pd.isna(x):
         return ""
 
@@ -189,7 +187,7 @@ def normalize_key(x) -> str:
 
 def to_number(series: pd.Series) -> pd.Series:
     """
-    Convert mixed Excel values into numeric values safely.
+    Convert Excel values into numbers.
     Negative values are preserved.
     """
 
@@ -211,7 +209,6 @@ def to_number(series: pd.Series) -> pd.Series:
 
 
 def fmt_inr(value) -> str:
-    """Indian number format with rupee sign, no decimal."""
     try:
         value = float(value)
     except Exception:
@@ -241,11 +238,6 @@ def fmt_inr(value) -> str:
 
 
 def fmt_short_indian(value) -> str:
-    """
-    Short Indian format:
-    1,00,000 = 1.00 L
-    1,00,00,000 = 1.00 Cr
-    """
     try:
         value = float(value)
     except Exception:
@@ -284,8 +276,20 @@ def safe_div(num, den):
         return 0
 
 
+def is_total_text(value) -> bool:
+    key = normalize_key(value)
+
+    return key in [
+        "TOTAL",
+        "GRANDTOTAL",
+        "GTOTAL",
+        "GRTOTAL",
+        "OVERALLTOTAL",
+        "SUBTOTAL",
+    ]
+
+
 def find_sheet_name(sheet_names: List[str], target: str) -> Optional[str]:
-    """Find sheet name case/space-insensitively."""
     target_key = normalize_key(target)
 
     for sheet in sheet_names:
@@ -293,7 +297,9 @@ def find_sheet_name(sheet_names: List[str], target: str) -> Optional[str]:
             return sheet
 
     for sheet in sheet_names:
-        if target_key in normalize_key(sheet) or normalize_key(sheet) in target_key:
+        sheet_key = normalize_key(sheet)
+
+        if target_key in sheet_key or sheet_key in target_key:
             return sheet
 
     return None
@@ -305,8 +311,18 @@ def make_file_object(file_bytes: bytes, file_name: str) -> BytesIO:
     return bio
 
 
+def get_excel_sheets(file_bytes: bytes, file_name: str) -> List[str]:
+    bio = make_file_object(file_bytes, file_name)
+
+    if file_name.lower().endswith(".xlsb"):
+        xl = pd.ExcelFile(bio, engine="pyxlsb")
+    else:
+        xl = pd.ExcelFile(bio)
+
+    return xl.sheet_names
+
+
 def read_excel_file(file_bytes: bytes, file_name: str, sheet_name: str, header=None) -> pd.DataFrame:
-    """Read Excel including .xlsb, .xlsx, .xlsm."""
     bio = make_file_object(file_bytes, file_name)
 
     if file_name.lower().endswith(".xlsb"):
@@ -324,20 +340,7 @@ def read_excel_file(file_bytes: bytes, file_name: str, sheet_name: str, header=N
     )
 
 
-def get_excel_sheets(file_bytes: bytes, file_name: str) -> List[str]:
-    bio = make_file_object(file_bytes, file_name)
-
-    if file_name.lower().endswith(".xlsb"):
-        xl = pd.ExcelFile(bio, engine="pyxlsb")
-    else:
-        xl = pd.ExcelFile(bio)
-
-    return xl.sheet_names
-
-
 def fix_month_order(df: pd.DataFrame, month_col: str = "Month") -> Tuple[pd.DataFrame, List[str]]:
-    """Fix month sorting like Jan-26, Feb-26, Mar-26 instead of alphabetical order."""
-
     df = df.copy()
 
     if month_col not in df.columns:
@@ -399,6 +402,73 @@ def fix_month_order(df: pd.DataFrame, month_col: str = "Month") -> Tuple[pd.Data
         month_order = df[month_col].astype(str).drop_duplicates().tolist()
 
     return df, month_order
+
+
+def is_stock_transfer_row(df: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+
+    possible_cols = [
+        "Billing Type",
+        "Sales Verticle",
+        "Sales Vertical",
+        "Expense type",
+        "TXTSold-to party",
+        "Party Code",
+        "Transporter/CFA",
+        "Transporter",
+    ]
+
+    stock_keywords = [
+        "STOCK TRANSFER",
+        "STOCKTRANSFER",
+        "STOCK TRF",
+        "STK TRANSFER",
+        "BRANCH TRANSFER",
+        "STO",
+    ]
+
+    for col in possible_cols:
+        if col in df.columns:
+            text = df[col].astype(str).str.upper().str.strip()
+
+            for keyword in stock_keywords:
+                mask = mask | text.str.contains(keyword, na=False)
+
+    return mask
+
+
+def is_misc_others_row(df: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+
+    possible_cols = [
+        "Billing Type",
+        "Sales Verticle",
+        "Sales Vertical",
+        "Expense type",
+        "TXTSold-to party",
+        "Party Code",
+        "Transporter/CFA",
+        "Transporter",
+    ]
+
+    misc_keywords = [
+        "MISC",
+        "MISCELLANEOUS",
+        "OTHERS",
+        "OTHER",
+        "OTHER SALES",
+        "MISC / OTHERS",
+        "MISC/OTHERS",
+    ]
+
+    for col in possible_cols:
+        if col in df.columns:
+            text = df[col].astype(str).str.upper().str.strip()
+
+            for keyword in misc_keywords:
+                mask = mask | text.str.contains(keyword, na=False)
+
+    return mask
 
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
@@ -503,7 +573,15 @@ def make_bar(
     show_plotly(fig)
 
 
-def make_line(df, x, y, title, color=None, category_orders=None, value_format="amount"):
+def make_line(
+    df,
+    x,
+    y,
+    title,
+    color=None,
+    category_orders=None,
+    value_format="amount"
+):
     if df.empty:
         st.info("No data available for this chart based on current filters.")
         return
@@ -562,63 +640,12 @@ def download_excel_button(sheets: dict, file_name: str):
     )
 
 
-def is_total_text(value) -> bool:
-    key = normalize_key(value)
-
-    return key in [
-        "TOTAL",
-        "GRANDTOTAL",
-        "GTOTAL",
-        "GRTOTAL",
-        "OVERALLTOTAL",
-        "SUBTOTAL",
-    ]
-
-
-def is_stock_transfer_row(df: pd.DataFrame) -> pd.Series:
-    """
-    Identify stock transfer rows.
-    Used to calculate Net Sales without Stock Transfer.
-    """
-
-    mask = pd.Series(False, index=df.index)
-
-    possible_cols = [
-        "Billing Type",
-        "Sales Verticle",
-        "Sales Vertical",
-        "Expense type",
-        "TXTSold-to party",
-        "Party Code",
-    ]
-
-    stock_keywords = [
-        "STOCK TRANSFER",
-        "STOCKTRANSFER",
-        "STOCK TRF",
-        "STK TRANSFER",
-        "BRANCH TRANSFER",
-        "STO",
-    ]
-
-    for col in possible_cols:
-        if col in df.columns:
-            text = df[col].astype(str).str.upper().str.strip()
-
-            for keyword in stock_keywords:
-                mask = mask | text.str.contains(keyword, na=False)
-
-    return mask
-
-
 # ============================================================
 # Data Loading and Preparation
 # ============================================================
 
 @st.cache_data(show_spinner=False)
 def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load Back Up and C&FA-Exp sheets, then prepare clean tables."""
-
     sheet_names = get_excel_sheets(file_bytes, file_name)
 
     backup_sheet = find_sheet_name(sheet_names, "Back Up")
@@ -631,8 +658,7 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         raise ValueError('Sheet "C&FA-Exp" not found in uploaded workbook.')
 
     # ------------------------------------------------------------
-    # Back Up sheet
-    # Header observed on Excel row 2, so header=1.
+    # Back Up Sheet
     # ------------------------------------------------------------
 
     backup = read_excel_file(
@@ -646,18 +672,15 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     backup = backup.loc[:, [c for c in backup.columns if c != ""]]
     backup = backup.dropna(how="all")
 
-    # Keep only transaction rows if Invoice No exists.
     if "Invoice No" in backup.columns:
         backup = backup[backup["Invoice No"].notna()].copy()
 
-    # Remove possible total rows from Back Up.
     for possible_col in ["Invoice No", "Month", "Transporter", "Sales Verticle"]:
         if possible_col in backup.columns:
             backup = backup[
                 ~backup[possible_col].astype(str).apply(is_total_text)
             ].copy()
 
-    # Date conversion for .xlsb serial dates.
     if "Date" in backup.columns:
         if pd.api.types.is_numeric_dtype(backup["Date"]):
             backup["Date"] = pd.to_datetime(
@@ -673,7 +696,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
                 dayfirst=True
             )
 
-    # Numeric columns
     numeric_cols = [
         "Net Bill",
         "Total Bill",
@@ -701,7 +723,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
             ]:
                 backup[col] = 0
 
-    # Text columns
     text_cols = [
         "Month",
         "Plant Name",
@@ -726,7 +747,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
                 .str.strip()
             )
 
-    # Standardize Sales Vertical spelling if required.
     if "Sales Vertical" in backup.columns and "Sales Verticle" not in backup.columns:
         backup["Sales Verticle"] = backup["Sales Vertical"]
 
@@ -746,7 +766,7 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
             backup[col] = "Not Available"
 
     # ------------------------------------------------------------
-    # Correct Net Sales Calculation
+    # Net Sales Correction
     # ------------------------------------------------------------
 
     backup["Net Sales"] = backup["Net Bill"]
@@ -762,23 +782,24 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         | billing_type_clean.str.contains("CN", na=False)
     )
 
-    # If returns / credit notes are positive in Excel, make them negative.
-    # If already negative, keep them negative.
     backup.loc[return_mask, "Net Sales"] = -backup.loc[return_mask, "Net Bill"].abs()
 
-    # ------------------------------------------------------------
-    # Stock Transfer Flags
-    # ------------------------------------------------------------
-
     backup["Is Stock Transfer"] = is_stock_transfer_row(backup)
+    backup["Is Misc Others"] = is_misc_others_row(backup)
+
+    backup["Net Sales KPI"] = np.where(
+        (~backup["Is Stock Transfer"]) & (~backup["Is Misc Others"]),
+        backup["Net Sales"],
+        0
+    )
 
     # ------------------------------------------------------------
-    # Calculated Back Up fields
+    # Calculated Back Up Fields
     # ------------------------------------------------------------
 
     backup["Calculated Freight %"] = np.where(
-        backup["Net Sales"].astype(float) != 0,
-        backup["Freight"].astype(float) / backup["Net Sales"].astype(float),
+        backup["Net Sales KPI"].astype(float) != 0,
+        backup["Freight"].astype(float) / backup["Net Sales KPI"].astype(float),
         0,
     )
 
@@ -818,7 +839,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
 
     raw = raw.dropna(how="all").reset_index(drop=True)
 
-    # Locate row where first two columns are Month and Nature.
     header_idx = None
 
     for i in range(len(raw)):
@@ -837,7 +857,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     location_headers = [clean_col_name(x) for x in raw.iloc[header_idx].tolist()]
     cfa_names_raw = [clean_col_name(x) for x in raw.iloc[cfa_name_row].tolist()]
 
-    # Forward-fill CFA names because merged Excel cells usually show name only once.
     cfa_names = []
     last_name = ""
 
@@ -854,7 +873,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     data.columns = location_headers
     data = data.dropna(how="all")
 
-    # First two columns are Month and Nature.
     data = data.rename(
         columns={
             data.columns[0]: "Month",
@@ -881,7 +899,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         & data["Nature"].notna()
     ].copy()
 
-    # Remove Grand Total / Total rows from C&FA-Exp.
     data = data[
         ~data["Month"].astype(str).apply(is_total_text)
         & ~data["Nature"].astype(str).apply(is_total_text)
@@ -891,11 +908,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         ~data["Month"].astype(str).str.upper().str.contains("GRAND TOTAL|TOTAL", na=False)
         & ~data["Nature"].astype(str).str.upper().str.contains("GRAND TOTAL|TOTAL", na=False)
     ].copy()
-
-    # ------------------------------------------------------------
-    # Convert C&FA-Exp from wide format to long format.
-    # Use column position to safely handle duplicate location names.
-    # ------------------------------------------------------------
 
     long_rows = []
 
@@ -912,7 +924,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         cfa_key = normalize_key(cfa_name)
         location_key = normalize_key(location)
 
-        # Remove Grand Total / Total columns
         if col_key in ["GRANDTOTAL", "TOTAL", "GTOTAL", "SUBTOTAL"]:
             continue
 
@@ -935,7 +946,6 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         temp["CFA Location"] = location
         temp["Expense Amount"] = to_number(temp["Expense Amount"])
 
-        # Keep only actual non-zero expense rows.
         temp = temp[temp["Expense Amount"] != 0].copy()
 
         long_rows.append(temp)
@@ -981,7 +991,7 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         .agg(
             Backup_Freight=("Freight", "sum"),
             Backup_Received_Bill=("Received Bill Amount", "sum"),
-            Backup_Net_Sales=("Net Sales", "sum"),
+            Backup_Net_Sales_KPI=("Net Sales KPI", "sum"),
             Invoice_Count=invoice_agg,
         )
         .reset_index()
@@ -1027,7 +1037,7 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
     for c in [
         "Backup_Freight",
         "Backup_Received_Bill",
-        "Backup_Net_Sales",
+        "Backup_Net_Sales_KPI",
         "Invoice_Count",
         "CFA_Expense"
     ]:
@@ -1046,6 +1056,12 @@ def load_and_prepare(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, p
         - recon["Backup_Freight"]
     )
 
+    recon["CFA Expense % on Net Sales KPI"] = np.where(
+        recon["Backup_Net_Sales_KPI"] != 0,
+        recon["CFA_Expense"] / recon["Backup_Net_Sales_KPI"] * 100,
+        0
+    )
+
     return backup, cfa_long, recon
 
 
@@ -1058,7 +1074,7 @@ st.markdown(
     <div class="hero-box">
         <div class="hero-title">🚚 Freight Analysis & C&FA Expense Control Tower</div>
         <div class="hero-subtitle">
-            Analyze Net Sales, Net Sales without Stock Transfer, Freight %, Received Bill, Sales Vertical, State, Zone, Transporter and C&FA nature-wise expenses.
+            Net Sales excludes Stock Transfer and Misc/Others. Freight includes Stock Transfer and Misc/Others freight.
         </div>
     </div>
     """,
@@ -1140,50 +1156,46 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-net_sales = filtered["Net Sales"].sum() if "Net Sales" in filtered.columns else 0
-raw_net_bill = filtered["Net Bill"].sum() if "Net Bill" in filtered.columns else 0
+gross_net_sales = filtered["Net Sales"].sum() if "Net Sales" in filtered.columns else 0
+net_sales_kpi = filtered["Net Sales KPI"].sum() if "Net Sales KPI" in filtered.columns else 0
+
+stock_transfer_net_sales = (
+    filtered.loc[filtered["Is Stock Transfer"], "Net Sales"].sum()
+    if "Is Stock Transfer" in filtered.columns
+    else 0
+)
+
+misc_others_net_sales = (
+    filtered.loc[filtered["Is Misc Others"], "Net Sales"].sum()
+    if "Is Misc Others" in filtered.columns
+    else 0
+)
 
 freight = filtered["Freight"].sum() if "Freight" in filtered.columns else 0
 received = filtered["Received Bill Amount"].sum() if "Received Bill Amount" in filtered.columns else 0
 loading_unloading = filtered["Loading + Unloading"].sum() if "Loading + Unloading" in filtered.columns else 0
 total_log_cost = filtered["Total Logistic Cost"].sum() if "Total Logistic Cost" in filtered.columns else 0
 
-stock_transfer_mask = is_stock_transfer_row(filtered)
-
-net_sales_without_stock_transfer = (
-    filtered.loc[~stock_transfer_mask, "Net Sales"].sum()
-    if "Net Sales" in filtered.columns
-    else 0
-)
-
-stock_transfer_net_sales = (
-    filtered.loc[stock_transfer_mask, "Net Sales"].sum()
-    if "Net Sales" in filtered.columns
-    else 0
-)
-
 stock_transfer_freight = (
-    filtered.loc[stock_transfer_mask, "Freight"].sum()
-    if "Freight" in filtered.columns
+    filtered.loc[filtered["Is Stock Transfer"], "Freight"].sum()
+    if "Is Stock Transfer" in filtered.columns
     else 0
 )
 
-# Freight % as requested:
-# Total Freight including Stock Transfer Freight ÷ Net Sales without Stock Transfer.
-freight_percent_on_net_sales = safe_div(freight, net_sales) * 100
-freight_percent_without_stock_transfer_sales = safe_div(
-    freight,
-    net_sales_without_stock_transfer
-) * 100
+misc_others_freight = (
+    filtered.loc[filtered["Is Misc Others"], "Freight"].sum()
+    if "Is Misc Others" in filtered.columns
+    else 0
+)
 
+freight_percent = safe_div(freight, net_sales_kpi) * 100
 variance = received - freight
 
 invoice_count = filtered["Invoice No"].nunique() if "Invoice No" in filtered.columns else len(filtered)
 transporter_count = filtered["Transporter"].nunique() if "Transporter" in filtered.columns else 0
 
 cfa_total = cfa_filtered["Expense Amount"].sum() if not cfa_filtered.empty else 0
-cfa_percent_on_net_sales = safe_div(cfa_total, net_sales) * 100
-cfa_percent_on_net_sales_without_st = safe_div(cfa_total, net_sales_without_stock_transfer) * 100
+cfa_percent_on_net_sales = safe_div(cfa_total, net_sales_kpi) * 100
 
 
 # ============================================================
@@ -1195,38 +1207,38 @@ k1, k2, k3, k4 = st.columns(4)
 with k1:
     show_metric_card(
         "Net Sales",
-        fmt_inr(net_sales),
-        f"Raw Net Bill: {fmt_inr(raw_net_bill)} | Invoices: {fmt_num(invoice_count)}"
+        fmt_inr(net_sales_kpi),
+        "Excludes Stock Transfer and Misc/Others"
     )
 
 with k2:
     show_metric_card(
-        "Net Sales without Stock Transfer",
-        fmt_inr(net_sales_without_stock_transfer),
-        f"Stock Transfer Sales: {fmt_inr(stock_transfer_net_sales)}"
+        "Freight",
+        fmt_inr(freight),
+        "Includes Stock Transfer and Misc/Others freight"
     )
 
 with k3:
     show_metric_card(
-        "Freight",
-        fmt_inr(freight),
-        "Total freight includes stock transfer freight"
+        "Freight % on Net Sales",
+        f"{freight_percent:.2f}%",
+        "Total Freight ÷ Net Sales"
     )
 
 with k4:
     show_metric_card(
-        "Freight % without Stock Transfer Sales",
-        f"{freight_percent_without_stock_transfer_sales:.2f}%",
-        "Total freight ÷ Net Sales without Stock Transfer"
+        "Received Bill",
+        fmt_inr(received),
+        f"Variance vs Freight: {fmt_inr(variance)}"
     )
 
 k5, k6, k7, k8 = st.columns(4)
 
 with k5:
     show_metric_card(
-        "Received Bill",
-        fmt_inr(received),
-        f"Variance vs Freight: {fmt_inr(variance)}"
+        "C&FA Expense",
+        fmt_inr(cfa_total),
+        f"{cfa_percent_on_net_sales:.2f}% of Net Sales"
     )
 
 with k6:
@@ -1238,16 +1250,16 @@ with k6:
 
 with k7:
     show_metric_card(
-        "C&FA Expense",
-        fmt_inr(cfa_total),
-        f"{cfa_percent_on_net_sales_without_st:.2f}% of Net Sales without ST"
+        "Stock Transfer Freight",
+        fmt_inr(stock_transfer_freight),
+        "Included in total freight"
     )
 
 with k8:
     show_metric_card(
-        "Transporters",
-        fmt_num(transporter_count),
-        f"Stock Transfer Freight: {fmt_inr(stock_transfer_freight)}"
+        "Misc/Others Freight",
+        fmt_inr(misc_others_freight),
+        "Included in total freight"
     )
 
 k9, k10, k11, k12 = st.columns(4)
@@ -1268,16 +1280,16 @@ with k10:
 
 with k11:
     show_metric_card(
-        "Loading + Unloading",
-        fmt_inr(loading_unloading),
-        "Additional logistic cost"
+        "Excluded Stock Transfer Sales",
+        fmt_inr(stock_transfer_net_sales),
+        "Excluded from Net Sales KPI"
     )
 
 with k12:
     show_metric_card(
-        "Freight % on Total Net Sales",
-        f"{freight_percent_on_net_sales:.2f}%",
-        "Total freight ÷ Total Net Sales"
+        "Excluded Misc/Others Sales",
+        fmt_inr(misc_others_net_sales),
+        "Excluded from Net Sales KPI"
     )
 
 
@@ -1313,7 +1325,7 @@ with tab1:
         monthly = (
             filtered.groupby("Month", dropna=False)
             .agg(
-                Net_Sales=("Net Sales", "sum"),
+                Net_Sales=("Net Sales KPI", "sum"),
                 Freight=("Freight", "sum"),
                 Received_Bill=("Received Bill Amount", "sum"),
                 Total_Logistic_Cost=("Total Logistic Cost", "sum"),
@@ -1321,32 +1333,15 @@ with tab1:
             .reset_index()
         )
 
-        monthly_no_st = (
-            filtered.loc[~stock_transfer_mask]
-            .groupby("Month", dropna=False)
-            .agg(
-                Net_Sales_without_ST=("Net Sales", "sum")
-            )
-            .reset_index()
-        )
-
-        monthly = monthly.merge(
-            monthly_no_st,
-            on="Month",
-            how="left"
-        )
-
-        monthly["Net_Sales_without_ST"] = monthly["Net_Sales_without_ST"].fillna(0)
-
         monthly["Freight %"] = np.where(
-            monthly["Net_Sales_without_ST"] != 0,
-            monthly["Freight"] / monthly["Net_Sales_without_ST"] * 100,
+            monthly["Net_Sales"] != 0,
+            monthly["Freight"] / monthly["Net_Sales"] * 100,
             0
         )
 
         monthly["Logistic Cost %"] = np.where(
-            monthly["Net_Sales_without_ST"] != 0,
-            monthly["Total_Logistic_Cost"] / monthly["Net_Sales_without_ST"] * 100,
+            monthly["Net_Sales"] != 0,
+            monthly["Total_Logistic_Cost"] / monthly["Net_Sales"] * 100,
             0
         )
 
@@ -1360,16 +1355,24 @@ with tab1:
         if not monthly.empty:
             plot_df = monthly.melt(
                 id_vars="Month",
-                value_vars=["Net_Sales", "Net_Sales_without_ST", "Freight", "Received_Bill"],
+                value_vars=["Net_Sales", "Freight", "Received_Bill"],
                 var_name="Metric",
                 value_name="Amount"
+            )
+
+            plot_df["Metric"] = plot_df["Metric"].replace(
+                {
+                    "Net_Sales": "Net Sales",
+                    "Freight": "Freight",
+                    "Received_Bill": "Received Bill",
+                }
             )
 
             make_bar(
                 plot_df,
                 "Month",
                 "Amount",
-                "Month-wise Net Sales / Net Sales without ST / Freight / Received Bill",
+                "Month-wise Net Sales / Freight / Received Bill",
                 color="Metric",
                 category_orders={"Month": month_order},
                 value_format="amount"
@@ -1381,7 +1384,7 @@ with tab1:
                 monthly,
                 "Month",
                 "Freight %",
-                "Month-wise Freight % on Net Sales without Stock Transfer",
+                "Month-wise Freight % on Net Sales",
                 category_orders={"Month": month_order},
                 value_format="percent"
             )
@@ -1450,7 +1453,7 @@ with tab2:
         transporter = (
             filtered.groupby("Transporter", dropna=False)
             .agg(
-                Net_Sales=("Net Sales", "sum"),
+                Net_Sales=("Net Sales KPI", "sum"),
                 Freight=("Freight", "sum"),
                 Received_Bill=("Received Bill Amount", "sum"),
                 Loading=("Loading", "sum"),
@@ -1563,8 +1566,9 @@ with tab3:
             vertical = (
                 filtered.groupby("Sales Verticle", dropna=False)
                 .agg(
-                    Net_Sales=("Net Sales", "sum"),
+                    Net_Sales=("Net Sales KPI", "sum"),
                     Freight=("Freight", "sum"),
+                    Received_Bill=("Received Bill Amount", "sum"),
                     Invoice_Count=invoice_agg
                 )
                 .reset_index()
@@ -1588,8 +1592,9 @@ with tab3:
             plant = (
                 filtered.groupby("Plant Name", dropna=False)
                 .agg(
-                    Net_Sales=("Net Sales", "sum"),
+                    Net_Sales=("Net Sales KPI", "sum"),
                     Freight=("Freight", "sum"),
+                    Received_Bill=("Received Bill Amount", "sum"),
                     Invoice_Count=invoice_agg
                 )
                 .reset_index()
@@ -1612,8 +1617,9 @@ with tab3:
         bill_type = (
             filtered.groupby("Billing Type", dropna=False)
             .agg(
-                Net_Sales=("Net Sales", "sum"),
-                Freight=("Freight", "sum")
+                Net_Sales=("Net Sales KPI", "sum"),
+                Freight=("Freight", "sum"),
+                Received_Bill=("Received Bill Amount", "sum"),
             )
             .reset_index()
             .sort_values("Freight", ascending=False)
@@ -1684,7 +1690,7 @@ with tab4:
 
     else:
         cfa_section_expense = cfa_filtered["Expense Amount"].sum()
-        cfa_section_net_sales = net_sales_without_stock_transfer
+        cfa_section_net_sales = net_sales_kpi
 
         cfa_section_percent = safe_div(
             cfa_section_expense,
@@ -1695,9 +1701,9 @@ with tab4:
 
         with cfa_k1:
             show_metric_card(
-                "Net Sales without Stock Transfer",
+                "Net Sales",
                 fmt_inr(cfa_section_net_sales),
-                "Used for C&FA Expense % calculation"
+                "Excludes Stock Transfer and Misc/Others"
             )
 
         with cfa_k2:
@@ -1711,7 +1717,7 @@ with tab4:
             show_metric_card(
                 "C&FA Expense % on Net Sales",
                 f"{cfa_section_percent:.2f}%",
-                "C&FA Expense ÷ Net Sales without ST"
+                "C&FA Expense ÷ Net Sales"
             )
 
         c1, c2 = st.columns(2)
@@ -1725,10 +1731,10 @@ with tab4:
             .sort_values("Expense_Amount", ascending=False)
         )
 
-        cfa_by_name["Net Sales without Stock Transfer"] = cfa_section_net_sales
+        cfa_by_name["Net Sales"] = cfa_section_net_sales
         cfa_by_name["CFA Expense % on Net Sales"] = np.where(
-            cfa_by_name["Net Sales without Stock Transfer"] != 0,
-            cfa_by_name["Expense_Amount"] / cfa_by_name["Net Sales without Stock Transfer"] * 100,
+            cfa_by_name["Net Sales"] != 0,
+            cfa_by_name["Expense_Amount"] / cfa_by_name["Net Sales"] * 100,
             0
         )
 
@@ -1770,10 +1776,10 @@ with tab4:
                 .reset_index()
             )
 
-            cfa_month["Net Sales without Stock Transfer"] = cfa_section_net_sales
+            cfa_month["Net Sales"] = cfa_section_net_sales
             cfa_month["CFA Expense % on Net Sales"] = np.where(
-                cfa_month["Net Sales without Stock Transfer"] != 0,
-                cfa_month["Expense_Amount"] / cfa_month["Net Sales without Stock Transfer"] * 100,
+                cfa_month["Net Sales"] != 0,
+                cfa_month["Expense_Amount"] / cfa_month["Net Sales"] * 100,
                 0
             )
 
@@ -1798,11 +1804,11 @@ with tab4:
                 .sort_values("Expense_Amount", ascending=False)
             )
 
-            cfa_loc["Net Sales without Stock Transfer"] = cfa_section_net_sales
+            cfa_loc["Net Sales"] = cfa_section_net_sales
 
             cfa_loc["CFA Expense % on Net Sales"] = np.where(
-                cfa_loc["Net Sales without Stock Transfer"] != 0,
-                cfa_loc["Expense_Amount"] / cfa_loc["Net Sales without Stock Transfer"] * 100,
+                cfa_loc["Net Sales"] != 0,
+                cfa_loc["Expense_Amount"] / cfa_loc["Net Sales"] * 100,
                 0
             )
 
@@ -1915,30 +1921,32 @@ with tab6:
     export_summary = pd.DataFrame(
         {
             "Particulars": [
-                "Net Sales",
-                "Net Sales without Stock Transfer",
-                "Stock Transfer Sales",
+                "Gross Net Sales",
+                "Net Sales KPI excluding Stock Transfer and Misc/Others",
+                "Stock Transfer Net Sales Excluded",
+                "Misc/Others Net Sales Excluded",
                 "Total Freight",
-                "Stock Transfer Freight",
-                "Freight % on Net Sales",
-                "Freight % on Net Sales without Stock Transfer",
+                "Stock Transfer Freight Included",
+                "Misc/Others Freight Included",
+                "Freight % on Net Sales KPI",
                 "Received Bill",
                 "Total Logistic Cost",
                 "C&FA Expense",
-                "C&FA Expense % on Net Sales without Stock Transfer",
+                "C&FA Expense % on Net Sales KPI",
             ],
             "Value": [
-                net_sales,
-                net_sales_without_stock_transfer,
+                gross_net_sales,
+                net_sales_kpi,
                 stock_transfer_net_sales,
+                misc_others_net_sales,
                 freight,
                 stock_transfer_freight,
-                freight_percent_on_net_sales,
-                freight_percent_without_stock_transfer_sales,
+                misc_others_freight,
+                freight_percent,
                 received,
                 total_log_cost,
                 cfa_total,
-                cfa_percent_on_net_sales_without_st,
+                cfa_percent_on_net_sales,
             ],
         }
     )
@@ -1961,7 +1969,7 @@ with tab6:
 st.caption(
     "Dashboard logic: Back Up sheet = freight, billing, transporter and sales analysis. "
     "C&FA-Exp sheet = C&FA name/location/nature-wise expense analysis. "
-    "Net Sales is calculated after reducing Sales Return / Credit Note values. "
-    "Grand Total / Total rows and columns from C&FA-Exp are excluded. "
-    "Freight % without Stock Transfer Sales uses total freight including stock transfer freight."
+    "Net Sales excludes Stock Transfer and Misc/Others. "
+    "Freight includes Stock Transfer and Misc/Others freight. "
+    "Grand Total / Total rows and columns from C&FA-Exp are excluded."
 )
